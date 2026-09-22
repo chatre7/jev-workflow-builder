@@ -4,6 +4,7 @@ import {
   Handle,
   Position,
   useNodeConnections,
+  useNodesData,
   useReactFlow,
   useUpdateNodeInternals,
   type NodeProps,
@@ -15,10 +16,12 @@ import {
   Check,
   CircleDashed,
   FileOutput,
+  GitBranch,
   Loader2,
   MessageSquareText,
   Pencil,
   Plus,
+  Rows3,
   Sparkles,
   Trash2,
 } from "lucide-react";
@@ -40,12 +43,18 @@ import {
   type NodeStatus,
 } from "./runs";
 import {
+  CONDITION_OPERATORS,
+  FALSE_HANDLE,
   IN_HANDLE,
   JEV_MODELS,
   LLM_MODEL_GROUPS,
   LLM_MODELS,
+  MAX_DATA_SOURCE_CHARS,
+  MAX_TRANSFORM_FIELDS,
+  TRUE_HANDLE,
   createOutputProperty,
   createQuestion,
+  createTransformField,
   getActivation,
   getOutputProperties,
   getOutputPropertyId,
@@ -53,6 +62,8 @@ import {
   slugify,
   truncate,
   type ActivationMode,
+  type ConditionNode,
+  type ConditionOperator,
   type Criterion,
   type HandleDef,
   type InputNode,
@@ -62,6 +73,8 @@ import {
   type OutputProperty,
   type QuestionDef,
   type QuestionType,
+  type TransformField,
+  type TransformNode,
   type WorkflowNode,
   type WorkflowEdge,
 } from "./shared";
@@ -836,6 +849,328 @@ const LlmNodeView = memo(({ id, data, selected }: NodeProps<LlmNode>) => {
 });
 
 /* -------------------------------------------------------------------------- */
+/*                              Data-only nodes                               */
+/* -------------------------------------------------------------------------- */
+
+function DataSourceHelp({ nodeId }: { nodeId: string }) {
+  const incoming = useNodeConnections({ id: nodeId, handleType: "target" });
+  const parents = useNodesData<WorkflowNode>(
+    [...new Set(incoming.map((connection) => connection.source))]
+  );
+
+  return (
+    <div className="space-y-1 text-[11px] leading-relaxed text-neutral-500">
+      <p>Paths, not templates:</p>
+      <ul className="space-y-0.5">
+        <li><code>input</code> — joined incoming text</li>
+        <li><code>json.amount</code> — a field in valid JSON input</li>
+        <li><code className="break-all">{"answers.<id>.confidence"}</code> — an inherited answer</li>
+        <li><code className="break-all">{"parents.<node-id>"}</code> — one connected parent&apos;s text</li>
+      </ul>
+      {parents.length > 0 ? (
+        <div className="space-y-1">
+          <p className="font-medium text-neutral-700">Connected parent paths</p>
+          <ul className="space-y-1">
+            {parents.map((parent) => (
+              <li key={parent.id}>
+                <span className="block break-words">{parent.data.label}</span>
+                <code className="block cursor-text select-text break-all text-neutral-700">
+                  parents.{parent.id}
+                </code>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      <p>
+        Use <code>json</code> for the whole JSON value. Answer paths also accept{" "}
+        <code>value</code> and <code>probability</code>. Missing fields, invalid
+        JSON or a parent that did not fire fail the run. JSON paths do not extract
+        data from prose.
+      </p>
+    </div>
+  );
+}
+
+const ConditionNodeView = memo(
+  ({ id, data, selected }: NodeProps<ConditionNode>) => {
+    const { updateNodeData } = useReactFlow<WorkflowNode>();
+    const { results } = useRun();
+    const result = results.get(id);
+    const node: ConditionNode = {
+      id, type: "condition", position: { x: 0, y: 0 }, data,
+    };
+    const operatorLabel =
+      CONDITION_OPERATORS.find((operator) => operator.id === data.operator)?.label;
+    const branch = result?.firedHandles?.find(
+      (handle) => handle === TRUE_HANDLE || handle === FALSE_HANDLE
+    );
+
+    return (
+      <NodeFrame
+        id={id}
+        node={node}
+        selected={selected}
+        icon={<GitBranch className="size-3.5" />}
+        accent="#d97706"
+        result={result}
+        hasTarget
+        handles={getSourceHandles(node)}
+        summary={
+          <div className="flex flex-col gap-1.5">
+            <p className="text-xs text-neutral-500">Compare a value · no AI</p>
+            <p className="break-words text-xs leading-relaxed text-neutral-700">
+              <code>{truncate(data.source, 60)}</code>{" "}
+              {operatorLabel?.toLowerCase()}{" "}
+              <code>{data.value === "" ? '""' : truncate(data.value, 60)}</code>
+            </p>
+            {branch ? (
+              <p className="text-xs font-medium text-amber-700">
+                Result: {branch} · input passed through
+              </p>
+            ) : null}
+          </div>
+        }
+        editor={
+          <div className="flex flex-col gap-2">
+            <label className="flex flex-col gap-1">
+              <FieldLabel>Source path</FieldLabel>
+              <TextField
+                value={data.source}
+                maxLength={MAX_DATA_SOURCE_CHARS}
+                placeholder="json.amount"
+                className="font-mono"
+                onCommit={(source) => updateNodeData(id, { source })}
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <FieldLabel>Operator</FieldLabel>
+              <Select
+                value={data.operator}
+                onChange={(event) =>
+                  updateNodeData(id, {
+                    operator: event.target.value as ConditionOperator,
+                  })
+                }
+              >
+                {CONDITION_OPERATORS.map((operator) => (
+                  <option key={operator.id} value={operator.id}>
+                    {operator.label}
+                  </option>
+                ))}
+              </Select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <FieldLabel>Value</FieldLabel>
+              <TextField
+                value={data.value}
+                placeholder="100"
+                onCommit={(value) => updateNodeData(id, { value })}
+              />
+            </label>
+            <p className="text-[11px] leading-relaxed text-neutral-500">
+              Text comparisons are exact and case-sensitive. Numeric comparisons
+              require decimal numbers. Use <code>true</code>, <code>false</code>{" "}
+              or <code>null</code> to match those JSON values. No AI is called;
+              only the matching true or false branch receives the original input.
+            </p>
+            <DataSourceHelp nodeId={id} />
+          </div>
+        }
+      />
+    );
+  }
+);
+
+function TransformFieldEditor({
+  field,
+  fields,
+  onChange,
+  onRemove,
+}: {
+  field: TransformField;
+  fields: TransformField[];
+  onChange: (changes: Partial<Pick<TransformField, "name" | "source">>) => void;
+  onRemove: () => void;
+}) {
+  const [draft, setDraft] = useState(field.name);
+  const [error, setError] = useState<string | null>(null);
+  const errorId = useId();
+
+  useEffect(() => setDraft(field.name), [field.name]);
+
+  function commit(value: string) {
+    const name = value.trim();
+    let message: string | null = null;
+    if (!/^[A-Za-z0-9_-]{1,96}$/.test(name)) {
+      message = "Use 1–96 letters, digits, underscores or hyphens.";
+    } else if (["__proto__", "constructor", "prototype"].includes(name)) {
+      message = "This field name is reserved. Choose another name.";
+    } else if (fields.some((entry) => entry.id !== field.id && entry.name === name)) {
+      message = "This field already exists.";
+    }
+    setError(message);
+    setDraft(message ? field.name : name);
+    if (!message && name !== field.name) onChange({ name });
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-end gap-1">
+        <label className="flex min-w-0 flex-1 flex-col gap-1">
+          <FieldLabel>Field name</FieldLabel>
+          <input
+            aria-label={`Field name: ${field.name}`}
+            aria-invalid={Boolean(error)}
+            aria-describedby={error ? errorId : undefined}
+            value={draft}
+            maxLength={96}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              setError(null);
+            }}
+            onBlur={(event) => commit(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                event.currentTarget.blur();
+              } else if (event.key === "Escape") {
+                setDraft(field.name);
+                event.currentTarget.value = field.name;
+                event.currentTarget.blur();
+              }
+            }}
+            spellCheck={false}
+            className="workflow-field nodrag nopan min-w-0 w-full rounded-md border border-neutral-200 bg-white px-2 py-1 font-mono text-xs text-neutral-900 focus:border-violet-400 focus:outline-none"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={onRemove}
+          disabled={fields.length <= 1}
+          className="icon-button nodrag shrink-0 hover:!text-red-600"
+          aria-label={`Remove field ${field.name}`}
+          title={fields.length <= 1 ? "Keep at least one field" : "Remove field"}
+        >
+          <Trash2 className="size-3" />
+        </button>
+      </div>
+      {error ? (
+        <p id={errorId} role="alert" className="text-[10px] text-red-600">
+          {error}
+        </p>
+      ) : null}
+      <label className="flex flex-col gap-1">
+        <FieldLabel>Source path</FieldLabel>
+        <TextField
+          aria-label={`Source path for ${field.name}`}
+          value={field.source}
+          maxLength={MAX_DATA_SOURCE_CHARS}
+          placeholder="json.amount"
+          className="font-mono"
+          onCommit={(source) => onChange({ source })}
+        />
+      </label>
+    </div>
+  );
+}
+
+const TransformNodeView = memo(
+  ({ id, data, selected }: NodeProps<TransformNode>) => {
+    const { updateNodeData } = useReactFlow<WorkflowNode>();
+    const { results } = useRun();
+    const result = results.get(id);
+    const node: TransformNode = {
+      id, type: "transform", position: { x: 0, y: 0 }, data,
+    };
+
+    function addField() {
+      if (data.fields.length >= MAX_TRANSFORM_FIELDS) return;
+      let index = 1;
+      while (data.fields.some((field) => field.name === `field_${index}`)) index++;
+      updateNodeData(id, { fields: [...data.fields, createTransformField(index)] });
+    }
+
+    return (
+      <NodeFrame
+        id={id}
+        node={node}
+        selected={selected}
+        icon={<Rows3 className="size-3.5" />}
+        accent="#0d9488"
+        result={result}
+        hasTarget
+        handles={getSourceHandles(node)}
+        summary={
+          <div className="flex flex-col gap-1.5">
+            <p className="text-xs text-neutral-500">
+              Map {data.fields.length} {data.fields.length === 1 ? "field" : "fields"} to JSON · no AI
+            </p>
+            {result?.output !== undefined && result.status !== "skipped" ? (
+              <pre
+                aria-label="JSON output preview"
+                className="max-h-24 overflow-hidden whitespace-pre-wrap break-all rounded bg-neutral-50 px-2 py-1 font-mono text-xs leading-relaxed text-neutral-700"
+              >
+                {truncate(result.output, 220)}
+              </pre>
+            ) : (
+              <ul className="space-y-1 text-xs text-neutral-700">
+                {data.fields.map((field) => (
+                  <li key={field.id} className="break-words">
+                    <code>{truncate(field.name, 40)}</code>
+                    <span className="text-neutral-500"> from </span>
+                    <code>{truncate(field.source, 60)}</code>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        }
+        editor={
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-3">
+              {data.fields.map((field) => (
+                <TransformFieldEditor
+                  key={field.id}
+                  field={field}
+                  fields={data.fields}
+                  onChange={(changes) =>
+                    updateNodeData(id, {
+                      fields: data.fields.map((entry) =>
+                        entry.id === field.id ? { ...entry, ...changes } : entry
+                      ),
+                    })
+                  }
+                  onRemove={() => {
+                    if (data.fields.length <= 1) return;
+                    updateNodeData(id, {
+                      fields: data.fields.filter((entry) => entry.id !== field.id),
+                    });
+                  }}
+                />
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={addField}
+              disabled={data.fields.length >= MAX_TRANSFORM_FIELDS}
+              className="nodrag flex min-h-7 items-center justify-center gap-1 rounded-md border border-dashed border-neutral-200 px-2 py-1 text-[11px] text-neutral-500 hover:border-neutral-300 hover:text-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Plus className="size-3" /> Add field ({data.fields.length}/{MAX_TRANSFORM_FIELDS})
+            </button>
+            <p className="text-[11px] leading-relaxed text-neutral-500">
+              Build a JSON object without AI. JSON selections keep their types;
+              input and parent texts remain strings.
+            </p>
+            <DataSourceHelp nodeId={id} />
+          </div>
+        }
+      />
+    );
+  }
+);
+
+/* -------------------------------------------------------------------------- */
 /*                                 Output node                                */
 /* -------------------------------------------------------------------------- */
 
@@ -1062,5 +1397,7 @@ export const nodeTypes: NodeTypes = {
   input: InputNodeView,
   jev: JevNodeView,
   llm: LlmNodeView,
+  condition: ConditionNodeView,
+  transform: TransformNodeView,
   output: OutputNodeView,
 };

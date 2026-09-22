@@ -2,6 +2,7 @@ import {
   INPUT_NODE_ID,
   OUTPUT_NODE_ID,
   IN_HANDLE,
+  MAX_TRANSFORM_FIELDS,
   getOutputProperties,
   getOutputPropertyId,
   getSourceHandles,
@@ -28,6 +29,7 @@ import {
   checkLimit,
   jsonSize,
 } from "./execution-policy";
+import { validateConditionOperands, validateDataSource } from "./data-nodes";
 
 export const MAX_GRAPH_STORAGE_CHARS = 512_000;
 const RESERVED_KEYS: Record<string, boolean> = { ["__proto__"]: true, constructor: true, prototype: true };
@@ -152,6 +154,30 @@ export function validateWorkflowGraph(value: unknown): {
         text(node.data.prompt, MAX_FIELD_CHARS);
         text(node.data.system, MAX_FIELD_CHARS);
         break;
+      case "condition":
+        validateDataSource(node.data.source);
+        validateConditionOperands(node.data.operator, node.data.value);
+        break;
+      case "transform": {
+        const fields = node.data.fields;
+        if (!Array.isArray(fields) || fields.length < 1 || fields.length > MAX_TRANSFORM_FIELDS) {
+          throw new ExecutionError(`Transform requires between 1 and ${MAX_TRANSFORM_FIELDS} fields.`);
+        }
+        const ids = new Set<string>();
+        const names = new Set<string>();
+        for (const field of fields) {
+          record(field);
+          identifier(field.id);
+          identifier(field.name);
+          if (ids.has(field.id) || names.has(field.name)) {
+            throw new ExecutionError("Transform field names and IDs must be unique.");
+          }
+          ids.add(field.id);
+          names.add(field.name);
+          validateDataSource(field.source);
+        }
+        break;
+      }
       default:
         throw new ExecutionError("Workflow contains an unsupported node type.");
     }
@@ -197,6 +223,15 @@ export function validateWorkflowGraph(value: unknown): {
     incoming.set(edge.target, count);
   }
   const graph = { nodes: nodes as WorkflowNode[], edges: edges as WorkflowEdge[] };
+  for (const node of graph.nodes) {
+    const sources = node.type === "condition" ? [node.data.source]
+      : node.type === "transform" ? node.data.fields.map((field) => field.source) : [];
+    for (const source of sources) {
+      if (source.startsWith("parents.") && !graph.edges.some((edge) => edge.target === node.id && edge.source === source.slice(8))) {
+        throw new ExecutionError("Parent data sources must reference an immediate incoming node.");
+      }
+    }
+  }
   if (topologicalOrder(graph.nodes, graph.edges) === null) throw new ExecutionError("The workflow contains a cycle.");
   return graph;
 }

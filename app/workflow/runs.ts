@@ -63,7 +63,7 @@ export type NodeResultData = {
   activation?: "any" | "all";
   // The resolved `input` state this node received.
   input: string;
-  // LLM output (streams in) or, for Jev nodes, the input passed through.
+  // Generated/transformed text, or unchanged input for Jev and Condition nodes.
   output?: string;
   // Output node only: parent texts per property, in connection order.
   // The array variant supports runs saved before outputs were separated.

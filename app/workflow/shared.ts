@@ -14,6 +14,21 @@ export const IN_HANDLE = "in";
 export const OUT_HANDLE = "out";
 // Every Jev node has one "always" handle in addition to its answer handles.
 export const ANY_HANDLE = "any";
+export const TRUE_HANDLE = "true";
+export const FALSE_HANDLE = "false";
+
+export const CONDITION_OPERATORS = [
+  { id: "eq", label: "Equals" },
+  { id: "ne", label: "Does not equal" },
+  { id: "gt", label: "Greater than" },
+  { id: "gte", label: "Greater than or equal" },
+  { id: "lt", label: "Less than" },
+  { id: "lte", label: "Less than or equal" },
+  { id: "contains", label: "Contains (case-sensitive)" },
+] as const;
+export type ConditionOperator = (typeof CONDITION_OPERATORS)[number]["id"];
+export const MAX_TRANSFORM_FIELDS = 8;
+export const MAX_DATA_SOURCE_CHARS = 256;
 
 // Text models verified against https://openrouter.ai/api/v1/models.
 export const LLM_MODEL_GROUPS = [
@@ -150,10 +165,30 @@ export type LlmNodeData = {
   activation?: ActivationMode;
 };
 
+export type ConditionNodeData = {
+  label: string;
+  source: string;
+  operator: ConditionOperator;
+  value: string;
+  activation?: ActivationMode;
+};
+
+export type TransformField = {
+  id: string;
+  name: string;
+  source: string;
+};
+
+export type TransformNodeData = {
+  label: string;
+  fields: TransformField[];
+  activation?: ActivationMode;
+};
+
 /**
  * Unique sink, like the input node. Collects parent texts into named output
  * properties, according to the connected target handle.
- * To merge several drafts into one string, run them through an LLM node first.
+ * Use Transform with parents.<node-id> to keep incoming texts in separate fields.
  */
 export type OutputNodeData = {
   label: string;
@@ -201,8 +236,16 @@ export function getActivation(data: {
 export type InputNode = Node<InputNodeData, "input">;
 export type JevNode = Node<JevNodeData, "jev">;
 export type LlmNode = Node<LlmNodeData, "llm">;
+export type ConditionNode = Node<ConditionNodeData, "condition">;
+export type TransformNode = Node<TransformNodeData, "transform">;
 export type OutputNode = Node<OutputNodeData, "output">;
-export type WorkflowNode = InputNode | JevNode | LlmNode | OutputNode;
+export type WorkflowNode =
+  | InputNode
+  | JevNode
+  | LlmNode
+  | ConditionNode
+  | TransformNode
+  | OutputNode;
 export type WorkflowNodeType = WorkflowNode["type"];
 
 export type WorkflowEdgeData = Record<string, never>;
@@ -265,6 +308,7 @@ export function getSourceHandles(node: WorkflowNode): HandleDef[] {
   switch (node.type) {
     case "input":
     case "llm":
+    case "transform":
       return [{ id: OUT_HANDLE, label: "output", title: "Output text" }];
     case "jev":
       return [
@@ -274,6 +318,11 @@ export function getSourceHandles(node: WorkflowNode): HandleDef[] {
           label: "always",
           title: "Fires on every run that reaches this node",
         },
+      ];
+    case "condition":
+      return [
+        { id: TRUE_HANDLE, label: "true", title: "The condition matched" },
+        { id: FALSE_HANDLE, label: "false", title: "The condition did not match" },
       ];
     case "output":
       return [];
@@ -404,6 +453,56 @@ export function createLlmNode(args: {
       model: args.model ?? DEFAULT_LLM_MODEL,
       system: args.system ?? "",
       prompt: args.prompt ?? "{{input}}",
+      activation: args.activation ?? "any",
+    },
+  };
+}
+
+export function createConditionNode(args: {
+  id?: string;
+  position: Point;
+  label?: string;
+  source?: string;
+  operator?: ConditionOperator;
+  value?: string;
+  activation?: ActivationMode;
+  selected?: boolean;
+}): ConditionNode {
+  return {
+    id: args.id ?? `condition-${nanoid(8)}`,
+    type: "condition",
+    position: args.position,
+    selected: args.selected,
+    data: {
+      label: args.label ?? "Condition",
+      source: args.source ?? "input",
+      operator: args.operator ?? "eq",
+      value: args.value ?? "",
+      activation: args.activation ?? "any",
+    },
+  };
+}
+
+export function createTransformField(index: number): TransformField {
+  return { id: `field-${nanoid(6)}`, name: `field_${index}`, source: "input" };
+}
+
+export function createTransformNode(args: {
+  id?: string;
+  position: Point;
+  label?: string;
+  fields?: TransformField[];
+  activation?: ActivationMode;
+  selected?: boolean;
+}): TransformNode {
+  return {
+    id: args.id ?? `transform-${nanoid(8)}`,
+    type: "transform",
+    position: args.position,
+    selected: args.selected,
+    data: {
+      label: args.label ?? "Transform",
+      fields: args.fields ?? [createTransformField(1)],
       activation: args.activation ?? "any",
     },
   };

@@ -33,9 +33,11 @@ import {
   Bot,
   Eye,
   FileOutput,
+  GitBranch,
   MessageSquareText,
   Plus,
   Redo2,
+  Rows3,
   Sparkles,
   Undo2,
   X,
@@ -54,16 +56,19 @@ import {
   FLOW_STORAGE_KEY,
   IN_HANDLE,
   WORKFLOW_EDGE_TYPE,
+  createConditionNode,
   createInputNode,
   createJevNode,
   createLlmNode,
   createOutputNode,
+  createTransformNode,
   createWorkflowEdge,
   getReachableNodeIds,
   getOutputPropertyId,
   wouldCreateCycle,
   type WorkflowEdge,
   type WorkflowNode,
+  type WorkflowNodeType,
 } from "./shared";
 
 function FlowCursor({ userId }: CursorsCursorProps) {
@@ -293,7 +298,7 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
   );
 
   const addNode = useCallback(
-    (kind: "input" | "jev" | "llm" | "output") => {
+    (kind: WorkflowNodeType) => {
       // Place new nodes near the center of the current viewport, offset so
       // repeated clicks don't stack exactly.
       const container = document.querySelector(".react-flow");
@@ -313,14 +318,28 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
         .filter((node) => node.selected)
         .map((node) => ({ type: "select", id: node.id, selected: false }));
 
-      const item =
-        kind === "input"
-          ? createInputNode({ position, selected: true })
-          : kind === "jev"
-            ? createJevNode({ position, selected: true })
-            : kind === "llm"
-              ? createLlmNode({ position, selected: true })
-              : createOutputNode({ position, selected: true });
+      let item: WorkflowNode;
+      const args = { position, selected: true };
+      switch (kind) {
+        case "input":
+          item = createInputNode(args);
+          break;
+        case "jev":
+          item = createJevNode(args);
+          break;
+        case "llm":
+          item = createLlmNode(args);
+          break;
+        case "condition":
+          item = createConditionNode(args);
+          break;
+        case "transform":
+          item = createTransformNode(args);
+          break;
+        case "output":
+          item = createOutputNode(args);
+          break;
+      }
 
       onNodesChange([...deselect, { type: "add", item }]);
     },
@@ -382,9 +401,12 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
             <Redo2 />
           </ControlButton>
         </Controls>
-        <Panel position="top-left">
+        <Panel
+          position="top-left"
+          className="!right-0 flex flex-wrap items-start justify-between gap-2"
+        >
           <div
-            className="node-toolbar floating-surface flex items-center gap-0.5 p-1"
+            className="node-toolbar floating-surface flex max-w-full flex-wrap items-center gap-0.5 p-1"
             role="group"
             aria-label="Add a node"
           >
@@ -423,6 +445,26 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
               </span>{" "}
               LLM
             </button>
+            <button
+              type="button"
+              onClick={() => addNode("condition")}
+              className="toolbar-button hover:bg-amber-50 hover:text-amber-700"
+            >
+              <span className="toolbar-icon bg-amber-50 text-amber-600">
+                <GitBranch className="size-4" />
+              </span>{" "}
+              Condition
+            </button>
+            <button
+              type="button"
+              onClick={() => addNode("transform")}
+              className="toolbar-button hover:bg-teal-50 hover:text-teal-700"
+            >
+              <span className="toolbar-icon bg-teal-50 text-teal-600">
+                <Rows3 className="size-4" />
+              </span>{" "}
+              Transform
+            </button>
             {nodes.some((node) => node.type === "output") ? null : (
               <button
                 type="button"
@@ -436,12 +478,14 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
               </button>
             )}
           </div>
+          {selectedRunId !== null ? (
+            <div className="ml-auto max-w-full">
+              <RunPreviewBanner />
+            </div>
+          ) : null}
         </Panel>
         <Panel position="top-center">
           <Toast message={toast} />
-        </Panel>
-        <Panel position="top-right" className="run-preview-panel">
-          <RunPreviewBanner />
         </Panel>
       </ReactFlow>
     </div>

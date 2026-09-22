@@ -14,7 +14,9 @@ import {
 } from "../runs";
 import {
   ANY_HANDLE,
+  FALSE_HANDLE,
   OUT_HANDLE,
+  TRUE_HANDLE,
   getActivation,
   getOutputProperties,
   getOutputPropertyId,
@@ -51,6 +53,7 @@ import {
   publicExecutionError,
 } from "./execution-policy";
 import { validateWorkflowGraph } from "./execution-validation";
+import { evaluateCondition, transformData, type DataNodeContext } from "./data-nodes";
 import { getLiveblocks, readWorkflowGraph } from "./liveblocks";
 import { runLlm } from "./llm";
 import { askJev, toTypeSafeQuestions, type JevState } from "./typesafe";
@@ -214,10 +217,11 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
           status: "running", parentNodeIds, activation: requireAll ? "all" : "any",
           input: "", startedAt: nodeStartedAt,
         };
-        const joinBaseSize = jsonSize({ ...base, ...(node.type === "jev" ? { output: "" } : {}) }, MAX_NODE_TRACE_CHARS, "Node trace");
-        // Reserve both the input and Jev's pass-through output before a join or call.
+        const passthrough = node.type === "jev" || node.type === "condition";
+        const joinBaseSize = jsonSize({ ...base, ...(passthrough ? { output: "" } : {}) }, MAX_NODE_TRACE_CHARS, "Node trace");
+        // Reserve both the input and pass-through output before a join or call.
         const nodeInput = boundedJoin(parentTexts, budget, (serializedSize) => {
-          const size = joinBaseSize + (serializedSize - 2) * (node.type === "jev" ? 2 : 1);
+          const size = joinBaseSize + (serializedSize - 2) * (passthrough ? 2 : 1);
           checkLimit(size, MAX_NODE_TRACE_CHARS, "Node trace");
           checkLimit(traceSize + size, MAX_RUN_TRACE_CHARS, "Run trace");
         });
@@ -279,6 +283,36 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
             mock: result.mock, model: result.model, durationMs: Date.now() - nodeStartedAt,
           });
           return { output: result.text, answers, firedHandles: new Set([OUT_HANDLE]) };
+        }
+        if (node.type === "condition" || node.type === "transform") {
+          const parentOutputs: Record<string, string> = Object.create(null);
+          for (let i = 0; i < parentNodeIds.length; i++) parentOutputs[parentNodeIds[i]] = parentTexts[i];
+          const context: DataNodeContext = { input: nodeInput, answers, parents: parentOutputs };
+          let output: string;
+          let handle: string;
+          if (node.type === "condition") {
+            handle = evaluateCondition(node.data, context) ? TRUE_HANDLE : FALSE_HANDLE;
+            output = nodeInput;
+          } else {
+            handle = OUT_HANDLE;
+            const outputBaseSize = jsonSize({
+              ...base, status: "complete", output: "", firedHandles: [handle],
+              durationMs: Date.now() - nodeStartedAt,
+            }, MAX_NODE_TRACE_CHARS, "Node trace");
+            output = transformData(node.data, context, (textSize, serializedSize) => {
+              active();
+              budget.text(textSize);
+              const size = outputBaseSize + serializedSize - 2;
+              checkLimit(size, MAX_NODE_TRACE_CHARS, "Node trace");
+              checkLimit(traceSize - (messageSizes.get(node.id) ?? 0) + size, MAX_RUN_TRACE_CHARS, "Run trace");
+            });
+          }
+          active();
+          await writeMessage({
+            ...base, status: "complete", output, firedHandles: [handle],
+            durationMs: Date.now() - nodeStartedAt,
+          });
+          return { output, answers, firedHandles: new Set([handle]) };
         }
         const properties = getOutputProperties(node.data);
         const outputs = createEmptyOutput(properties);

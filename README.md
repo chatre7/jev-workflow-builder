@@ -64,6 +64,46 @@ Model IDs are stored in workflows. If an existing workflow selected
 `moonshotai/kimi-k3-fast`, choose another model in the editor: that ID is not
 available on OpenRouter. It is not silently remapped.
 
+### Condition and Transform nodes
+
+Both nodes run locally without an AI provider call or model tokens. Add them
+from the canvas toolbar; they support the existing `any` / `all` activation modes.
+
+**Condition** compares a source value with a configured value and fires exactly
+one `true` or `false` handle, passing its input through unchanged. Operators are
+equals, does not equal, contains, `>`, `>=`, `<`, and `<=`. Text comparisons are
+case-sensitive. Numeric ordering accepts finite decimal numbers or decimal
+strings, not blanks, whitespace, hexadecimal, booleans, or null. Equality uses
+the source's scalar type; use `true`, `false`, or `null` for those JSON values.
+Missing data, invalid JSON, or invalid operands fail the run rather than silently
+taking the false branch.
+
+**Transform** maps 1–8 source values to uniquely named JSON fields. Selected JSON
+numbers, booleans, nulls, objects, and arrays keep their types; text sources stay
+strings. It does not infer fields from LLM prose. Output is JSON **text**, so the
+run API's existing named arrays of output strings are unchanged.
+
+Source paths are not templates or JavaScript:
+
+| Source | Value |
+| --- | --- |
+| `input` | Joined incoming text |
+| `json` / `json.refund_amount` | Whole JSON input / an own field |
+| `json.items.0.id` | A field in the first array item |
+| `answers.risk.value` | An inherited Jev answer value |
+| `answers.risk.confidence` / `.probability` | Confidence / probability |
+| `parents.customer-draft` | Raw text from that immediate parent |
+
+Connected parent labels and paths appear in each node's editor. A parent whose
+connection did not fire is unavailable; use `all` when every mapped parent is
+required. Paths and output field names reject reserved prototype keys.
+
+For example, compare `json.refund_amount > 1000`, route `true` to a review
+Transform and `false` to a customer-draft Transform. The review branch can retain
+`internal_note`, while the customer branch selects only `customer_draft` and
+`order_id`. This is deterministic routing, not authorization to transfer money.
+Existing graph, input, trace, and output-size limits also apply to these nodes.
+
 ### Server-to-server runs
 
 Generate an independent random `WORKFLOW_API_TOKEN` (32–256 non-whitespace

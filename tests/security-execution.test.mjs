@@ -6,14 +6,21 @@ import { createModuleLoader } from "./load-module.mjs";
 function fixtures(shared, kind = "llm") {
   const input = shared.createInputNode({ position: { x: 0, y: 0 } });
   const output = shared.createOutputNode({ position: { x: 2, y: 0 } });
-  const middle = kind === "jev"
-    ? shared.createJevNode({ id: "middle", position: { x: 1, y: 0 } })
-    : shared.createLlmNode({ id: "middle", position: { x: 1, y: 0 } });
+  const factory = {
+    jev: shared.createJevNode,
+    llm: shared.createLlmNode,
+    condition: shared.createConditionNode,
+    transform: shared.createTransformNode,
+  }[kind];
+  const middle = factory({ id: "middle", position: { x: 1, y: 0 } });
   return {
     nodes: [input, middle, output],
     edges: [
       shared.createWorkflowEdge({ source: "input", sourceHandle: "out", target: "middle" }),
-      shared.createWorkflowEdge({ source: "middle", sourceHandle: kind === "jev" ? "any" : "out", target: "output", targetHandle: "customer" }),
+      shared.createWorkflowEdge({ source: "middle", sourceHandle: kind === "jev" ? "any" : kind === "condition" ? "true" : "out", target: "output", targetHandle: "customer" }),
+      ...(kind === "condition" ? [
+        shared.createWorkflowEdge({ source: "middle", sourceHandle: "false", target: "output", targetHandle: "team" }),
+      ] : []),
     ],
   };
 }
@@ -434,4 +441,189 @@ test("failed message writes cannot starve terminal metadata finalization", async
   assert.equal(cancelledMessage, true);
   assert.equal(metadata.at(-1).status, "error");
   assert.doesNotMatch(JSON.stringify(trace), /secret-provider-error/);
+});
+
+test("Condition enforces the refund threshold and selects exactly one output", async () => {
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    streamText: () => { throw new Error("A deterministic rule must not call AI."); },
+    globals: { fetch: async () => { throw new Error("A deterministic rule must not call AI."); } },
+  });
+  const graph = fixtures(h.shared, "condition");
+  Object.assign(graph.nodes[1].data, { source: "json.amount", operator: "gt", value: "1000" });
+  h.setGraph(graph);
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  for (const amount of [1000, 1000.01]) {
+    const input = JSON.stringify({ amount });
+    const trace = await startWorkflowRun({ roomId: "private-room", input, trigger: "test" }).trace$;
+    assert.equal(trace.status, "complete");
+    const matched = amount > 1000;
+    assert.deepEqual(Array.from(trace.output[matched ? "customer" : "team"]), [input]);
+    assert.deepEqual(Array.from(trace.output[matched ? "team" : "customer"]), []);
+  }
+});
+
+test("invalid Condition inputs fail instead of silently taking the false branch", async () => {
+  const h = await harness();
+  const graph = fixtures(h.shared, "condition");
+  Object.assign(graph.nodes[1].data, { source: "json.amount", operator: "gt", value: "1000" });
+  h.setGraph(graph);
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  for (const input of ["not JSON", "{}", '{"amount":null}', '{"amount":"0x20"}']) {
+    const trace = await startWorkflowRun({ roomId: "private-room", input, trigger: "test" }).trace$;
+    assert.equal(trace.status, "error");
+    assert.equal(trace.nodes.find((node) => node.nodeId === "middle").status, "error");
+    assert.equal(trace.nodes.some((node) => node.nodeId === "output" && node.status === "complete"), false);
+  }
+});
+
+test("Transform projects typed JSON without exposing unselected fields", async () => {
+  const h = await harness();
+  const graph = fixtures(h.shared, "transform");
+  graph.nodes[1].data.fields = [
+    { id: "reply", name: "customer_draft", source: "json.customer.reply" },
+    { id: "note", name: "internal_note", source: "json.internal.note" },
+    { id: "approved", name: "approved", source: "json.approved" },
+    { id: "amount", name: "amount", source: "json.amount" },
+    { id: "items", name: "items", source: "json.items" },
+    { id: "first", name: "first_sku", source: "json.items.0.sku" },
+  ];
+  h.setGraph(graph);
+  const input = JSON.stringify({
+    customer: { reply: 'Hello\n"customer"' },
+    internal: { note: "Keep internal" },
+    approved: false, amount: 0, items: [{ sku: "A", quantity: 2 }],
+    secret: "Do not include this field",
+  });
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "private-room", input, trigger: "test" }).trace$;
+  assert.equal(trace.status, "complete");
+  assert.deepEqual(JSON.parse(trace.output.customer[0]), {
+    customer_draft: 'Hello\n"customer"', internal_note: "Keep internal",
+    approved: false, amount: 0, items: [{ sku: "A", quantity: 2 }], first_sku: "A",
+  });
+});
+
+test("Transform keeps parallel parent outputs separate at an all join", async () => {
+  const h = await harness();
+  const graph = fixtures(h.shared, "transform");
+  const left = h.shared.createTransformNode({
+    id: "left", position: { x: 1, y: 0 },
+    fields: [{ id: "public", name: "text", source: "json.public" }],
+  });
+  const right = h.shared.createTransformNode({
+    id: "right", position: { x: 1, y: 1 },
+    fields: [{ id: "private", name: "note", source: "json.private" }],
+  });
+  graph.nodes.push(left, right);
+  Object.assign(graph.nodes[1].data, {
+    activation: "all",
+    fields: [
+      { id: "customer", name: "customer_draft", source: "parents.left" },
+      { id: "team", name: "internal_note", source: "parents.right" },
+    ],
+  });
+  graph.edges = [graph.edges[1], ...[left, right].flatMap((node) => [
+    h.shared.createWorkflowEdge({ source: "input", sourceHandle: "out", target: node.id }),
+    h.shared.createWorkflowEdge({ source: node.id, sourceHandle: "out", target: "middle" }),
+  ])];
+  h.setGraph(graph);
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({
+    roomId: "private-room", input: '{"public":"Hello","private":"Staff only"}', trigger: "test",
+  }).trace$;
+  assert.equal(trace.status, "complete");
+  assert.deepEqual(JSON.parse(trace.output.customer[0]), {
+    customer_draft: '{"text":"Hello"}', internal_note: '{"note":"Staff only"}',
+  });
+});
+
+test("Transform cannot read a parent whose conditional connection did not fire", async () => {
+  const h = await harness();
+  const graph = fixtures(h.shared, "transform");
+  const condition = h.shared.createConditionNode({
+    id: "branch", position: { x: 1, y: 0 }, source: "input", operator: "eq", value: "left",
+  });
+  const right = h.shared.createTransformNode({
+    id: "right", position: { x: 1, y: 1 },
+    fields: [{ id: "text", name: "text", source: "input" }],
+  });
+  graph.nodes.push(condition, right);
+  graph.nodes[1].data.fields = [{ id: "private", name: "private", source: "parents.right" }];
+  graph.edges = [
+    graph.edges[1],
+    h.shared.createWorkflowEdge({ source: "input", sourceHandle: "out", target: "branch" }),
+    h.shared.createWorkflowEdge({ source: "branch", sourceHandle: "true", target: "middle" }),
+    h.shared.createWorkflowEdge({ source: "branch", sourceHandle: "false", target: "right" }),
+    h.shared.createWorkflowEdge({ source: "right", sourceHandle: "out", target: "middle" }),
+  ];
+  h.setGraph(graph);
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "private-room", input: "left", trigger: "test" }).trace$;
+  assert.equal(trace.status, "error");
+  assert.equal(trace.nodes.find((node) => node.nodeId === "middle").status, "error");
+  assert.equal(trace.nodes.some((node) => node.nodeId === "output" && node.status === "complete"), false);
+});
+
+test("data node validation rejects unsafe paths and ambiguous mapping fields", async () => {
+  const h = await harness();
+  const { validateWorkflowGraph } = await h.load("app/workflow/server/execution-validation");
+  for (const mutate of [
+    (data) => { data.fields[0].source = "json.account.constructor.prototype"; },
+    (data) => { data.fields[0].name = "__proto__"; },
+    (data) => { data.fields[0].source = "parents.not-connected"; },
+    (data) => { data.fields.push({ ...data.fields[0], id: "other" }); },
+    (data) => { data.fields = Array.from({ length: h.shared.MAX_TRANSFORM_FIELDS + 1 }, (_, i) => ({ id: `id_${i}`, name: `field_${i}`, source: "input" })); },
+  ]) {
+    const graph = fixtures(h.shared, "transform");
+    mutate(graph.nodes[1].data);
+    assert.throws(() => validateWorkflowGraph(graph));
+  }
+  const graph = fixtures(h.shared, "condition");
+  graph.nodes[1].data.operator = "execute";
+  assert.throws(() => validateWorkflowGraph(graph));
+});
+
+test("Transform preserves Jev confidence for a later deterministic review rule", async () => {
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    globals: { fetch: async () => new Response(JSON.stringify({
+      model: "typesafe/jev-1.13",
+      answers: { question_1: { type: "choice", choice: "option_a", confidence: 0.49, probabilities: { option_a: 0.6, option_b: 0.4 } } },
+    })) },
+  });
+  const graph = fixtures(h.shared, "condition");
+  Object.assign(graph.nodes[1].data, { source: "answers.question_1.confidence", operator: "lt", value: "0.5" });
+  const jev = h.shared.createJevNode({ id: "decision", position: { x: 1, y: 0 } });
+  const transform = h.shared.createTransformNode({
+    id: "mapped", position: { x: 2, y: 0 },
+    fields: [{ id: "message", name: "message", source: "input" }],
+  });
+  graph.nodes.push(jev, transform);
+  graph.edges = [
+    ...graph.edges.slice(1),
+    h.shared.createWorkflowEdge({ source: "input", sourceHandle: "out", target: "decision" }),
+    h.shared.createWorkflowEdge({ source: "decision", sourceHandle: "any", target: "mapped" }),
+    h.shared.createWorkflowEdge({ source: "mapped", sourceHandle: "out", target: "middle" }),
+  ];
+  h.setGraph(graph);
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "private-room", input: "uncertain case", trigger: "test" }).trace$;
+  assert.equal(trace.status, "complete");
+  assert.deepEqual(Array.from(trace.output.customer), ['{"message":"uncertain case"}']);
+  assert.deepEqual(Array.from(trace.output.team), []);
+});
+
+test("Transform expansion cannot bypass output text limits", async () => {
+  const h = await harness();
+  const graph = fixtures(h.shared, "transform");
+  graph.nodes[1].data.fields = Array.from({ length: 8 }, (_, i) => ({
+    id: `id_${i}`, name: `copy_${i}`, source: "input",
+  }));
+  h.setGraph(graph);
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "private-room", input: "x".repeat(5000), trigger: "test" }).trace$;
+  assert.equal(trace.status, "error");
+  assert.equal(trace.nodes.find((node) => node.nodeId === "middle").status, "error");
+  assert.equal(trace.nodes.some((node) => node.nodeId === "output" && node.status === "complete"), false);
 });

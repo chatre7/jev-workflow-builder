@@ -225,20 +225,11 @@ select:disabled {
   box-shadow: var(--workspace-shadow);
 }
 
-.workflow-canvas .react-flow__panel.run-preview-panel {
-  max-width: calc(100% - 16px);
-}
 
 .run-preview-banner {
   white-space: nowrap;
 }
 
-/* Keep the preview clear of the add-node toolbar on narrow canvases. */
-@container (max-width: 680px) {
-  .workflow-canvas .run-preview-panel {
-    top: 44px;
-  }
-}
 
 @container (max-width: 520px) {
   .run-preview-details {

@@ -17,8 +17,10 @@ import {
   ChevronLeft,
   ChevronRight,
   FlaskConical,
+  GitBranch,
   History,
   Route,
+  Rows3,
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -31,7 +33,9 @@ import {
 } from "./runs";
 import type { WorkflowSummary } from "./server/liveblocks";
 import {
+  FALSE_HANDLE,
   INPUT_NODE_ID,
+  TRUE_HANDLE,
   truncate,
   type WorkflowNode,
   type WorkflowNodeType,
@@ -79,6 +83,10 @@ function NodeTypeIcon({ type }: { type: WorkflowNodeType }) {
       return <Sparkles className="size-3.5 text-violet-600" />;
     case "llm":
       return <Bot className="size-3.5 text-sky-600" />;
+    case "condition":
+      return <GitBranch className="size-3.5 text-amber-600" />;
+    case "transform":
+      return <Rows3 className="size-3.5 text-teal-600" />;
     case "output":
       return <FileOutput className="size-3.5 text-emerald-600" />;
   }
@@ -209,6 +217,11 @@ function TraceNode({
   onFocus: () => void;
 }) {
   const outputs = getRunOutput(message.outputs);
+  const conditionBranch = message.nodeType === "condition"
+    ? message.firedHandles?.find(
+        (handle) => handle === TRUE_HANDLE || handle === FALSE_HANDLE
+      )
+    : undefined;
 
   return (
     <li style={{ paddingLeft: depth * 10 }}>
@@ -270,6 +283,36 @@ function TraceNode({
               <span className="ml-0.5 inline-block h-3 w-1 animate-pulse bg-violet-500 align-middle" />
             ) : null}
           </p>
+        ) : null}
+
+        {conditionBranch ? (
+          <div className="border-t border-neutral-100 px-2.5 py-1.5">
+            <p className="text-xs font-medium text-amber-700">
+              Result: {conditionBranch} · no AI
+            </p>
+            <p className="mt-1 text-[10px] text-neutral-500">
+              Original input passed to the {conditionBranch} branch
+            </p>
+            <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-neutral-700">
+              {truncate(message.output ?? message.input, 400)}
+            </p>
+          </div>
+        ) : null}
+
+        {message.nodeType === "transform" &&
+        message.output !== undefined &&
+        message.status !== "skipped" ? (
+          <div className="border-t border-neutral-100 px-2.5 py-1.5">
+            <p className="mb-1 text-[10px] font-medium text-neutral-500">
+              JSON output · no AI
+            </p>
+            <pre
+              aria-label="JSON output"
+              className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-neutral-700"
+            >
+              {message.output}
+            </pre>
+          </div>
         ) : null}
 
         {message.nodeType === "output" && message.outputs ? (
