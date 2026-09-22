@@ -1,22 +1,63 @@
 import "server-only";
 
-import { Liveblocks } from "@liveblocks/node";
+import { Liveblocks, LiveblocksError, type RoomData } from "@liveblocks/node";
 import { mutateFlow } from "@liveblocks/react-flow/node";
 import { nanoid } from "nanoid";
 import { createDemoWorkflow, DEMO_WORKFLOW_NAME } from "../demo";
 import {
-  EXAMPLE_ID,
+  WORKFLOW_APP_ID,
   FLOW_STORAGE_KEY,
   ROOM_ID_PREFIX,
   type WorkflowEdge,
   type WorkflowNode,
 } from "../shared";
+import type { Principal } from "./auth";
+import {
+  ExecutionError,
+  MAX_GRAPH_EDGES,
+  MAX_GRAPH_NODES,
+} from "./execution-policy";
 
-export const liveblocks = new Liveblocks({
-  secret: process.env.LIVEBLOCKS_SECRET_KEY!,
-  // Only set when running against the local Liveblocks dev server.
-  baseUrl: process.env.LIVEBLOCKS_BASE_URL,
-});
+let client: Liveblocks | undefined;
+const WORKFLOW_ID = /^[A-Za-z0-9_-]{10,64}$/;
+const WORKSPACE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const MAX_WORKFLOW_NAME_LENGTH = 120;
+
+export function getWorkspaceId(): string {
+  const workspaceId = process.env.WORKFLOW_WORKSPACE_ID ?? "private";
+  if (!WORKSPACE_ID.test(workspaceId)) {
+    throw new Error(
+      "WORKFLOW_WORKSPACE_ID must contain 1–64 letters, numbers, underscores or hyphens."
+    );
+  }
+  return workspaceId;
+}
+
+export function getLiveblocksConfigurationError(): string | null {
+  if (!process.env.LIVEBLOCKS_SECRET_KEY?.trim()) {
+    return "Set LIVEBLOCKS_SECRET_KEY to enable workflow storage.";
+  }
+  if (!process.env.LIVEBLOCKS_SECRET_KEY.startsWith("sk_")) {
+    return "LIVEBLOCKS_SECRET_KEY must be a Liveblocks secret key.";
+  }
+  if (!WORKSPACE_ID.test(process.env.WORKFLOW_WORKSPACE_ID ?? "private")) {
+    return "WORKFLOW_WORKSPACE_ID must contain 1–64 letters, numbers, underscores or hyphens.";
+  }
+  return null;
+}
+
+export function getLiveblocks(): Liveblocks {
+  const configurationError = getLiveblocksConfigurationError();
+  if (configurationError) {
+    throw new Error(configurationError);
+  }
+  client ??= new Liveblocks({
+    secret: process.env.LIVEBLOCKS_SECRET_KEY!,
+    // Only set when running against the local Liveblocks dev server.
+    baseUrl: process.env.LIVEBLOCKS_BASE_URL,
+  });
+  return client;
+}
 
 export type WorkflowSummary = {
   workflowId: string;
@@ -25,48 +66,63 @@ export type WorkflowSummary = {
   lastConnectionAt: number | null;
 };
 
-/**
- * `exampleId` is used when deploying an example on liveblocks.io to isolate
- * gallery sessions from each other. You can ignore it when running locally.
- */
-export function getAppKey(exampleId: string | null | undefined): string {
-  return exampleId ? `${EXAMPLE_ID}-${exampleId}` : EXAMPLE_ID;
+export function getRoomId(workflowId: string): string {
+  if (typeof workflowId !== "string" || !WORKFLOW_ID.test(workflowId)) {
+    throw new Error("Invalid workflow ID.");
+  }
+  return `${ROOM_ID_PREFIX}:${getWorkspaceId()}:${workflowId}`;
 }
 
-export function getRoomId(
-  workflowId: string,
-  exampleId: string | null | undefined
-): string {
-  const prefix = exampleId ? `${ROOM_ID_PREFIX}-${exampleId}` : ROOM_ID_PREFIX;
-  return `${prefix}:${workflowId}`;
+function assertPrincipal(principal: Principal): void {
+  // Only trusted server callers construct principals, including run-only API
+  // automation. Room membership comes from the deployment, never client input.
+  if (!principal || typeof principal.id !== "string" || !principal.id) {
+    throw new Error("Authentication required.");
+  }
 }
 
-export function isWorkflowRoomId(roomId: string): boolean {
-  return roomId.startsWith(`${ROOM_ID_PREFIX}`);
+function matchesWorkflow(room: RoomData, workflowId: string): boolean {
+  return (
+    room.id === getRoomId(workflowId) &&
+    room.metadata.app === WORKFLOW_APP_ID &&
+    room.metadata.workspaceId === getWorkspaceId() &&
+    room.metadata.workflowId === workflowId &&
+    room.defaultAccesses.length === 0
+  );
 }
 
-function getMetadataString(value: string | string[] | undefined): string {
-  return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
+function summarizeWorkflow(room: RoomData, workflowId: string): WorkflowSummary {
+  return {
+    workflowId,
+    name:
+      typeof room.metadata.name === "string"
+        ? room.metadata.name
+        : "Untitled workflow",
+    createdAt: new Date(room.createdAt).getTime(),
+    lastConnectionAt: room.lastConnectionAt
+      ? new Date(room.lastConnectionAt).getTime()
+      : null,
+  };
 }
 
 export async function listWorkflows(
-  exampleId: string | null | undefined
+  principal: Principal
 ): Promise<WorkflowSummary[]> {
-  const { data } = await liveblocks.getRooms({
-    query: { metadata: { app: getAppKey(exampleId) } },
+  assertPrincipal(principal);
+  const { data } = await getLiveblocks().getRooms({
+    query: {
+      metadata: { app: WORKFLOW_APP_ID, workspaceId: getWorkspaceId() },
+      roomId: { startsWith: `${ROOM_ID_PREFIX}:${getWorkspaceId()}:` },
+    },
     limit: 50,
   });
 
   return data
-    .map((room) => ({
-      workflowId: getMetadataString(room.metadata.workflowId),
-      name: getMetadataString(room.metadata.name) || "Untitled workflow",
-      createdAt: new Date(room.createdAt).getTime(),
-      lastConnectionAt: room.lastConnectionAt
-        ? new Date(room.lastConnectionAt).getTime()
-        : null,
-    }))
-    .filter((workflow) => workflow.workflowId !== "")
+    .filter((room) => {
+      const id = room.metadata.workflowId;
+      return typeof id === "string" && WORKFLOW_ID.test(id) && matchesWorkflow(room, id);
+    })
+    .map((room) => summarizeWorkflow(room, room.metadata.workflowId as string))
     .sort(
       (a, b) =>
         (b.lastConnectionAt ?? b.createdAt) -
@@ -76,42 +132,56 @@ export async function listWorkflows(
 
 export async function getWorkflow(
   workflowId: string,
-  exampleId: string | null | undefined
+  principal: Principal
 ): Promise<WorkflowSummary | null> {
-  try {
-    const room = await liveblocks.getRoom(getRoomId(workflowId, exampleId));
-
-    return {
-      workflowId,
-      name: getMetadataString(room.metadata.name) || "Untitled workflow",
-      createdAt: new Date(room.createdAt).getTime(),
-      lastConnectionAt: room.lastConnectionAt
-        ? new Date(room.lastConnectionAt).getTime()
-        : null,
-    };
-  } catch {
+  assertPrincipal(principal);
+  if (typeof workflowId !== "string" || !WORKFLOW_ID.test(workflowId)) {
     return null;
+  }
+  try {
+    const room = await getLiveblocks().getRoom(getRoomId(workflowId));
+    return matchesWorkflow(room, workflowId)
+      ? summarizeWorkflow(room, workflowId)
+      : null;
+  } catch (error) {
+    if (error instanceof LiveblocksError && error.status === 404) {
+      return null;
+    }
+    throw error;
   }
 }
 
+function validateWorkflowName(name: string): string {
+  if (typeof name !== "string" || name.length > MAX_WORKFLOW_NAME_LENGTH) {
+    throw new Error(`Workflow names must be at most ${MAX_WORKFLOW_NAME_LENGTH} characters.`);
+  }
+  return name.trim() || "Untitled workflow";
+}
+
 export async function createWorkflow(
-  exampleId: string | null | undefined,
+  principal: Principal,
   options: { name?: string; seedDemo?: boolean } = {}
 ): Promise<WorkflowSummary> {
+  assertPrincipal(principal);
   const workflowId = nanoid(10);
-  const roomId = getRoomId(workflowId, exampleId);
-  const name =
+  const roomId = getRoomId(workflowId);
+  const name = validateWorkflowName(
     options.name ??
-    (options.seedDemo ? DEMO_WORKFLOW_NAME : "Untitled workflow");
-
+      (options.seedDemo ? DEMO_WORKFLOW_NAME : "Untitled workflow")
+  );
+  const liveblocks = getLiveblocks();
   const room = await liveblocks.createRoom(roomId, {
-    defaultAccesses: ["room:write"],
-    metadata: { app: getAppKey(exampleId), workflowId, name },
+    defaultAccesses: [],
+    metadata: {
+      app: WORKFLOW_APP_ID,
+      workspaceId: getWorkspaceId(),
+      workflowId,
+      name,
+    },
   });
 
   const { nodes, edges } =
     options.seedDemo === true ? createDemoWorkflow() : { nodes: [], edges: [] };
-
   await mutateFlow<WorkflowNode, WorkflowEdge>(
     { client: liveblocks, roomId, storageKey: FLOW_STORAGE_KEY },
     (flow) => {
@@ -119,44 +189,62 @@ export async function createWorkflow(
       flow.addEdges(edges);
     }
   );
-
-  return {
-    workflowId,
-    name,
-    createdAt: new Date(room.createdAt).getTime(),
-    lastConnectionAt: null,
-  };
+  return summarizeWorkflow(room, workflowId);
 }
 
 export async function renameWorkflow(
   workflowId: string,
-  exampleId: string | null | undefined,
+  principal: Principal,
   name: string
 ): Promise<void> {
-  await liveblocks.updateRoom(getRoomId(workflowId, exampleId), {
-    metadata: { name: name.trim() || "Untitled workflow" },
+  const nextName = validateWorkflowName(name);
+  if (!(await getWorkflow(workflowId, principal))) {
+    throw new Error("Workflow not found.");
+  }
+  await getLiveblocks().updateRoom(getRoomId(workflowId), {
+    metadata: { name: nextName },
   });
 }
 
-/**
- * Reads a point-in-time snapshot of the workflow graph from Storage.
- */
-export async function readWorkflowGraph(roomId: string): Promise<{
-  nodes: WorkflowNode[];
-  edges: WorkflowEdge[];
-}> {
-  let snapshot: { nodes: WorkflowNode[]; edges: WorkflowEdge[] } = {
-    nodes: [],
-    edges: [],
-  };
-
-  await mutateFlow<WorkflowNode, WorkflowEdge>(
-    { client: liveblocks, roomId, storageKey: FLOW_STORAGE_KEY },
-    (flow) => {
-      const json = flow.toJSON();
-      snapshot = { nodes: [...json.nodes], edges: [...json.edges] };
+function boundedGraphValues<T>(entries: object, limit: number): T[] {
+  const values: T[] = [];
+  for (const key in entries) {
+    if (!Object.prototype.hasOwnProperty.call(entries, key)) {
+      continue;
     }
-  );
+    if (values.length >= limit) {
+      throw new ExecutionError("Workflow graph exceeds execution limits.");
+    }
+    values.push((entries as Record<string, T>)[key]);
+  }
+  return values;
+}
 
-  return snapshot;
+/** Reads a privileged snapshot only after the caller authorizes the room. */
+export async function readWorkflowGraph(
+  roomId: string,
+  signal?: AbortSignal
+): Promise<{ nodes: WorkflowNode[]; edges: WorkflowEdge[] }> {
+  const storage = (await getLiveblocks().getStorageDocument(roomId, "json", {
+    signal,
+  })) as Record<string, unknown>;
+  const flow = storage[FLOW_STORAGE_KEY];
+  if (flow === undefined) {
+    return { nodes: [], edges: [] };
+  }
+  if (flow === null || typeof flow !== "object" || Array.isArray(flow)) {
+    throw new Error("Invalid workflow storage.");
+  }
+  const { nodes, edges } = flow as Record<string, unknown>;
+  if (
+    nodes === null || typeof nodes !== "object" || Array.isArray(nodes) ||
+    edges === null || typeof edges !== "object" || Array.isArray(edges)
+  ) {
+    throw new Error("Invalid workflow graph storage.");
+  }
+  // Liveblocks serializes the React Flow LiveMaps as keyed JSON objects.
+  return {
+    nodes: boundedGraphValues<WorkflowNode>(nodes, MAX_GRAPH_NODES),
+    edges: boundedGraphValues<WorkflowEdge>(edges, MAX_GRAPH_EDGES),
+  };
 }

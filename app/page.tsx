@@ -1,42 +1,66 @@
+import { Workflow as WorkflowIcon } from "lucide-react";
+import Link from "next/link";
 import { WorkflowList } from "./workflow/workflow-list";
-import { listWorkflows } from "./workflow/server/liveblocks";
+import {
+  getAuthConfigurationError,
+  getPrincipal,
+} from "./workflow/server/auth";
+import {
+  getLiveblocksConfigurationError,
+  listWorkflows,
+} from "./workflow/server/liveblocks";
 
 export const dynamic = "force-dynamic";
 
-type SearchParams = Record<string, string | string[] | undefined>;
+export default async function Page() {
+  const configurationError =
+    getAuthConfigurationError() ?? getLiveblocksConfigurationError();
+  const principal = configurationError ? null : await getPrincipal();
 
-function getParam(params: SearchParams, key: string): string | null {
-  const value = params[key];
-  return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
-}
-
-/**
- * Lists workflows (one Liveblocks room each). Workflows are created explicitly.
- */
-export default async function Page({
-  searchParams,
-}: {
-  searchParams: Promise<SearchParams>;
-}) {
-  const params = await searchParams;
-  // Used when deploying an example on liveblocks.io. Ignore locally.
-  const exampleId = getParam(params, "exampleId");
-
-  if (!process.env.LIVEBLOCKS_SECRET_KEY) {
+  if (!principal) {
     return (
-      <main className="flex h-dvh items-center justify-center p-8 text-sm text-neutral-600">
-        Set{" "}
-        <code className="mx-1 rounded bg-neutral-100 px-1">
-          LIVEBLOCKS_SECRET_KEY
-        </code>{" "}
-        in
-        <code className="mx-1 rounded bg-neutral-100 px-1">.env.local</code> to
-        get started.
+      <main className="workflow-library min-h-dvh">
+        <nav className="library-nav" aria-label="Workspace">
+          <Link href="/" className="flex items-center gap-2">
+            <span className="brand-mark !size-6 !rounded-md">
+              <WorkflowIcon className="size-3.5" aria-hidden />
+            </span>
+            <span className="text-xs font-semibold tracking-tight">Workflows</span>
+          </Link>
+        </nav>
+        <section className="mx-auto w-full max-w-xl px-6 py-16 sm:py-24">
+          <h1 className="text-2xl font-semibold tracking-tight text-neutral-900">
+            Your private workflow workspace
+          </h1>
+          {configurationError ? (
+            <div className="mt-4 space-y-3 text-base leading-relaxed text-neutral-600">
+              <p>Workspace setup is incomplete. Private workflows are locked.</p>
+              <p>{configurationError}</p>
+              <p className="text-sm">
+                Ask the deployment administrator to update the server environment
+                and redeploy. No secret values should be shared here.
+              </p>
+            </div>
+          ) : (
+            <>
+              <p className="mt-4 text-base leading-relaxed text-neutral-600">
+                Sign in with an approved GitHub account to create workflows and
+                collaborate with your workspace. Only explicitly allowed members
+                can access this deployment.
+              </p>
+              <Link
+                href="/api/auth/signin?callbackUrl=%2F"
+                className="primary-button mt-6 inline-flex"
+              >
+                Sign in with GitHub
+              </Link>
+            </>
+          )}
+        </section>
       </main>
     );
   }
 
-  const workflows = await listWorkflows(exampleId);
-
-  return <WorkflowList workflows={workflows} exampleId={exampleId} />;
+  const workflows = await listWorkflows(principal);
+  return <WorkflowList workflows={workflows} />;
 }

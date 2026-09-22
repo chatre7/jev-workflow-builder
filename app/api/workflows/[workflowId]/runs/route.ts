@@ -2,91 +2,91 @@ import { after, NextRequest, NextResponse } from "next/server";
 import type { RunTrigger } from "../../../../workflow/runs";
 import { startWorkflowRun } from "../../../../workflow/server/executor";
 import { getRoomId, getWorkflow } from "../../../../workflow/server/liveblocks";
+import { acquireRunLease } from "../../../../workflow/server/run-admission";
+import {
+  ApiError,
+  authenticateRunRequest,
+  readJsonObject,
+} from "../../../../workflow/server/request-security";
 
-// Runs can take a while when several LLM nodes chain.
+export const runtime = "nodejs";
 export const maxDuration = 120;
 
 /**
- * Triggers a workflow run.
- *
- *   POST /api/workflows/<workflowId>/runs
- *   { "input": "text to evaluate" }
- *
- * Responds `202 { runId }` immediately while the run streams into a
- * Liveblocks feed in the workflow's room. Add `?wait=true` to block until the
- * run finishes and get `{ output: Record<string, string[]>,
- * nodes, ... }` back as JSON.
- *
- * `exampleId` is only used when this example is embedded on liveblocks.io.
+ * Authenticated test runs use the browser session and same-origin requests.
+ * Automation uses Authorization: Bearer WORKFLOW_API_TOKEN (run-only access).
+ * Add ?wait=true for the final trace; otherwise progress is delivered by feeds.
  */
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ workflowId: string }> }
 ) {
-  if (!process.env.LIVEBLOCKS_SECRET_KEY) {
-    return NextResponse.json(
-      { error: "Missing LIVEBLOCKS_SECRET_KEY" },
-      { status: 403 }
-    );
-  }
-
-  const { workflowId } = await params;
-  const exampleId = request.nextUrl.searchParams.get("exampleId");
-  const wait = ["1", "true"].includes(
-    request.nextUrl.searchParams.get("wait") ?? ""
-  );
-
-  let body: { input?: unknown; trigger?: unknown };
-
   try {
-    body = (await request.json()) as typeof body;
-  } catch {
-    return NextResponse.json(
-      { error: 'Body must be JSON: { "input": string }' },
-      { status: 400 }
-    );
-  }
+    const principal = await authenticateRunRequest(request);
+    const body = await readJsonObject(request);
+    if (typeof body.input !== "string" || body.input.trim() === "") {
+      throw new ApiError(400, "`input` must be a non-empty string.");
+    }
+    if (body.input.length > 20_000) {
+      throw new ApiError(413, "`input` must be at most 20,000 characters.");
+    }
+    if (body.trigger !== undefined && body.trigger !== "test" && body.trigger !== "api") {
+      throw new ApiError(400, "`trigger` must be test or api.");
+    }
+    if (request.nextUrl.searchParams.has("exampleId")) {
+      throw new ApiError(400, "Client-selected workspace namespaces are not supported.");
+    }
+    const { workflowId } = await params;
+    const workflow = await getWorkflow(workflowId, principal);
+    if (!workflow) throw new ApiError(404, "Workflow not found.");
 
-  if (typeof body.input !== "string" || body.input.trim() === "") {
-    return NextResponse.json(
-      { error: "`input` must be a non-empty string" },
-      { status: 400 }
-    );
-  }
+    const roomId = getRoomId(workflowId);
+    const trigger: RunTrigger = principal.id === "api:automation" ? "api"
+      : body.trigger === "test" ? "test" : "api";
+    const lease = await acquireRunLease(principal.id, roomId);
+    let run;
+    try {
+      run = startWorkflowRun({ roomId, input: body.input, trigger });
+    } catch (error) {
+      await lease.release();
+      throw error;
+    }
+    // Hold the distributed reservation through actual completion, not just HTTP 202.
+    const trace = run.trace$.finally(() => lease.release());
+    const wait = ["1", "true"].includes(request.nextUrl.searchParams.get("wait") ?? "");
+    if (wait) {
+      const result = await trace;
+      return NextResponse.json(result, {
+        status: result.status === "error" ? 500 : 200,
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
 
-  if (body.input.length > 20_000) {
-    return NextResponse.json(
-      { error: "`input` must be under 20,000 characters" },
-      { status: 413 }
-    );
-  }
-
-  const workflow = await getWorkflow(workflowId, exampleId);
-
-  if (!workflow) {
-    return NextResponse.json({ error: "Workflow not found" }, { status: 404 });
-  }
-
-  const trigger: RunTrigger = body.trigger === "test" ? "test" : "api";
-  const roomId = getRoomId(workflowId, exampleId);
-  const { runId, trace$ } = startWorkflowRun({
-    roomId,
-    input: body.input,
-    trigger,
-  });
-
-  if (wait) {
-    const trace = await trace$;
-    return NextResponse.json(trace, {
-      status: trace.status === "error" ? 500 : 200,
+    after(async () => {
+      try {
+        await trace;
+      } catch {
+        console.error("Workflow execution failed.");
+      }
+    });
+    return NextResponse.json({ runId: run.runId, status: "running" }, {
+      status: 202,
+      headers: { "Cache-Control": "no-store" },
+    });
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return NextResponse.json({ error: error.message }, {
+        status: error.status,
+        headers: {
+          "Cache-Control": "no-store",
+          ...(error.retryAfter ? { "Retry-After": String(error.retryAfter) } : {}),
+        },
+      });
+    }
+    console.error("Workflow request failed.");
+    return NextResponse.json({ error: "Unable to run this workflow. Try again later." }, {
+      status: 503,
+      headers: { "Cache-Control": "no-store" },
     });
   }
-
-  // Respond right away; `after` keeps the function alive until the run has
-  // finished writing into the feed. Errors are recorded in the feed metadata.
-  after(() =>
-    trace$.catch((error) => console.error("Workflow run failed", error))
-  );
-
-  return NextResponse.json({ runId, status: "running" }, { status: 202 });
 }

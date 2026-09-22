@@ -84,18 +84,12 @@ function NodeTypeIcon({ type }: { type: WorkflowNodeType }) {
   }
 }
 
-function getApiUrl(workflowId: string, exampleId: string | null): string {
+function getApiUrl(workflowId: string): string {
   const origin =
     typeof window === "undefined"
       ? "http://localhost:3000"
       : window.location.origin;
-  const params = new URLSearchParams({ wait: "true" });
-
-  if (exampleId) {
-    params.set("exampleId", exampleId);
-  }
-
-  return `${origin}/api/workflows/${workflowId}/runs?${params}`;
+  return `${origin}/api/workflows/${encodeURIComponent(workflowId)}/runs?wait=true`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -547,13 +541,7 @@ function RunList() {
 /*                                  Runs tab                                  */
 /* -------------------------------------------------------------------------- */
 
-function RunsTab({
-  workflow,
-  exampleId,
-}: {
-  workflow: WorkflowSummary;
-  exampleId: string | null;
-}) {
+function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
   const inputNode = useNodesData<WorkflowNode>(INPUT_NODE_ID);
   const { selectRun } = useRun();
   const [input, setInput] = useState<string | null>(null);
@@ -568,14 +556,8 @@ function RunsTab({
     setError(null);
 
     try {
-      const params = new URLSearchParams();
-
-      if (exampleId) {
-        params.set("exampleId", exampleId);
-      }
-
       const response = await fetch(
-        `/api/workflows/${workflow.workflowId}/runs${params.size > 0 ? `?${params}` : ""}`,
+        `/api/workflows/${encodeURIComponent(workflow.workflowId)}/runs`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -714,13 +696,17 @@ function getSnippet(language: SnippetLanguage, url: string): string {
       return [
         `curl -X POST "${url}" \\`,
         `  -H "Content-Type: application/json" \\`,
+        `  -H "Authorization: Bearer $WORKFLOW_API_TOKEN" \\`,
         `  -d '${JSON.stringify({ input: SNIPPET_INPUT })}'`,
       ].join("\n");
     case "javascript":
       return [
         `const response = await fetch(${JSON.stringify(url)}, {`,
         `  method: "POST",`,
-        `  headers: { "Content-Type": "application/json" },`,
+        `  headers: {`,
+        `    "Content-Type": "application/json",`,
+        `    "Authorization": "Bearer " + process.env.WORKFLOW_API_TOKEN,`,
+        `  },`,
         `  body: JSON.stringify({`,
         `    input: ${JSON.stringify(SNIPPET_INPUT)},`,
         `  }),`,
@@ -731,10 +717,12 @@ function getSnippet(language: SnippetLanguage, url: string): string {
       ].join("\n");
     case "python":
       return [
+        `import os`,
         `import requests`,
         ``,
         `response = requests.post(`,
         `    ${JSON.stringify(url)},`,
+        `    headers={"Authorization": "Bearer " + os.environ["WORKFLOW_API_TOKEN"]},`,
         `    json={"input": ${JSON.stringify(SNIPPET_INPUT)}},`,
         `)`,
         ``,
@@ -744,22 +732,16 @@ function getSnippet(language: SnippetLanguage, url: string): string {
   }
 }
 
-function ApiTab({
-  workflow,
-  exampleId,
-}: {
-  workflow: WorkflowSummary;
-  exampleId: string | null;
-}) {
+function ApiTab({ workflow }: { workflow: WorkflowSummary }) {
   const [language, setLanguage] = useState<SnippetLanguage>("curl");
   const [copied, setCopied] = useState(false);
   const [url, setUrl] = useState(() =>
-    getApiUrl(workflow.workflowId, exampleId)
+    getApiUrl(workflow.workflowId)
   );
 
   useEffect(() => {
-    setUrl(getApiUrl(workflow.workflowId, exampleId));
-  }, [workflow.workflowId, exampleId]);
+    setUrl(getApiUrl(workflow.workflowId));
+  }, [workflow.workflowId]);
 
   const snippet = getSnippet(language, url);
 
@@ -833,6 +815,13 @@ function ApiTab({
             Each value is an array of messages received by that input. The run
             also shows up in the Runs tab for everyone in the room.
           </p>
+          <p className="leading-relaxed">
+            These examples run on your server and require{" "}
+            <code className="rounded bg-neutral-100 px-1">WORKFLOW_API_TOKEN</code>.
+            Configure the same secret on this application and the calling service.
+            Never put it in browser code. The token permits runs within this private
+            workspace, not editing or Liveblocks access.
+          </p>
           <ul className="flex flex-col gap-1.5 leading-relaxed">
             <li>
               <code className="rounded bg-neutral-100 px-1">?wait=true</code>{" "}
@@ -850,6 +839,11 @@ function ApiTab({
               right away while the run streams into the feed.
             </li>
             <li>
+              Requests are subject to shared concurrency, rate, and daily budgets.
+              A <code className="rounded bg-neutral-100 px-1">429</code> response
+              includes <code className="rounded bg-neutral-100 px-1">Retry-After</code>.
+            </li>
+            <li>
               Each Jev node makes one request; each LLM node streams its
               response. Without API keys, both use mock responses.
             </li>
@@ -864,13 +858,7 @@ function ApiTab({
 /*                                 Side panel                                 */
 /* -------------------------------------------------------------------------- */
 
-export function SidePanel({
-  workflow,
-  exampleId,
-}: {
-  workflow: WorkflowSummary;
-  exampleId: string | null;
-}) {
+export function SidePanel({ workflow }: { workflow: WorkflowSummary }) {
   const [tab, setTab] = useState<Tab>("runs");
   const [collapsed, setCollapsed] = useState(false);
 
@@ -924,9 +912,9 @@ export function SidePanel({
         </button>
       </div>
       {tab === "runs" ? (
-        <RunsTab workflow={workflow} exampleId={exampleId} />
+        <RunsTab workflow={workflow} />
       ) : (
-        <ApiTab workflow={workflow} exampleId={exampleId} />
+        <ApiTab workflow={workflow} />
       )}
     </aside>
   );

@@ -1,29 +1,18 @@
 import { notFound } from "next/navigation";
 import { WorkflowApp } from "../../workflow/workflow-app";
+import { requirePrincipal } from "../../workflow/server/auth";
 import { getRoomId, getWorkflow } from "../../workflow/server/liveblocks";
 
 export const dynamic = "force-dynamic";
 
-type SearchParams = Record<string, string | string[] | undefined>;
-
-function getParam(params: SearchParams, key: string): string | null {
-  const value = params[key];
-  return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
-}
-
 export default async function WorkflowPage({
   params,
-  searchParams,
 }: {
   params: Promise<{ workflowId: string }>;
-  searchParams: Promise<SearchParams>;
 }) {
   const { workflowId } = await params;
-  const search = await searchParams;
-  // Used when deploying an example on liveblocks.io. Ignore locally.
-  const exampleId = getParam(search, "exampleId");
-
-  const workflow = await getWorkflow(workflowId, exampleId);
+  const principal = await requirePrincipal();
+  const workflow = await getWorkflow(workflowId, principal);
 
   if (!workflow) {
     notFound();
@@ -31,9 +20,8 @@ export default async function WorkflowPage({
 
   return (
     <WorkflowApp
-      roomId={getRoomId(workflowId, exampleId)}
+      roomId={getRoomId(workflowId)}
       workflow={workflow}
-      exampleId={exampleId}
     />
   );
 }

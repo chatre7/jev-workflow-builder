@@ -1,51 +1,63 @@
 import "server-only";
 
 import { nanoid } from "nanoid";
+import type { Liveblocks as LiveblocksClient } from "@liveblocks/node";
 import {
   MAX_INPUT_PREVIEW,
   MAX_NODE_EXECUTIONS,
-  RUN_TIMEOUT_MS,
   createEmptyOutput,
   getRunOutput,
   type Answer,
   type NodeResultData,
   type RunTrace,
   type RunTrigger,
-  type WorkflowOutput,
 } from "../runs";
 import {
   ANY_HANDLE,
-  INPUT_NODE_ID,
   OUT_HANDLE,
   getActivation,
   getOutputProperties,
   getOutputPropertyId,
   getReachableNodeIds,
   questionHandleId,
-  renderTemplate,
   topologicalOrder,
   truncate,
   type AnswerValue,
-  type JevNode,
-  type LlmNode,
+  type OutputProperty,
   type QuestionDef,
   type WorkflowNode,
 } from "../shared";
-import { liveblocks, readWorkflowGraph } from "./liveblocks";
+import {
+  ExecutionError,
+  FEED_FINALIZE_TIMEOUT_MS,
+  FEED_TIMEOUT_MS,
+  MAX_INPUT_CHARS,
+  MAX_NODE_PROMPT_CHARS,
+  MAX_NODE_TRACE_CHARS,
+  MAX_PROVIDER_CONCURRENCY,
+  MAX_RUN_TRACE_CHARS,
+  STORAGE_TIMEOUT_MS,
+  STREAM_THROTTLE_MS,
+  TRACE_FINALIZATION_RESERVE_CHARS,
+  RunBudget,
+  abortable,
+  boundedJoin,
+  boundedOperation,
+  boundedTemplates,
+  checkAbort,
+  checkLimit,
+  deadline,
+  jsonSize,
+  publicExecutionError,
+} from "./execution-policy";
+import { validateWorkflowGraph } from "./execution-validation";
+import { getLiveblocks, readWorkflowGraph } from "./liveblocks";
 import { runLlm } from "./llm";
-import { askJev, type JevState } from "./typesafe";
+import { askJev, toTypeSafeQuestions, type JevState } from "./typesafe";
 
-const STREAM_THROTTLE_MS = 100;
-
-/**
- * What a node hands to its children once it has finished.
- */
 type NodeState = {
   output: string;
-  // Template-friendly answers accumulated along the path so far.
   answers: Record<string, AnswerValue>;
-  // Raw TypeSafe answers accumulated along the path so far.
-  rawAnswers: Record<string, Answer>;
   firedHandles: Set<string>;
 };
 
@@ -55,10 +67,6 @@ export type RunWorkflowOptions = {
   trigger: RunTrigger;
 };
 
-/**
- * Starts a run and returns its id right away, plus a promise for the full
- * trace once every node has settled.
- */
 export function startWorkflowRun(options: RunWorkflowOptions): {
   runId: string;
   trace$: Promise<RunTrace>;
@@ -67,507 +75,339 @@ export function startWorkflowRun(options: RunWorkflowOptions): {
   return { runId, trace$: runWorkflow(runId, options) };
 }
 
-async function runWorkflow(
-  runId: string,
-  options: RunWorkflowOptions
-): Promise<RunTrace> {
+async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<RunTrace> {
   const { roomId, input, trigger } = options;
   const startedAt = Date.now();
+  const runDeadline = deadline();
+  const signal = runDeadline.signal;
+  const budget = new RunBudget();
   const messages = new Map<string, NodeResultData>();
-  const abort = new AbortController();
-  const timeout = setTimeout(() => abort.abort(), RUN_TIMEOUT_MS);
+  const messageSizes = new Map<string, number>();
+  const messageIds = new Map<string, string>();
+  const results = new Map<string, Promise<NodeState | null>>();
+  const providerTasks = new Set<Promise<unknown>>();
+  let liveblocks: LiveblocksClient | undefined;
+  let outputProperties: OutputProperty[] = [];
   let executions = 0;
-  let limitReached = false;
-
+  let closed = false;
+  let error: string | undefined;
+  // Reserve metadata, the returned input, and terminal error overhead up front.
+  let traceSize = TRACE_FINALIZATION_RESERVE_CHARS;
+  let outputSize = 0;
   const metadata: Liveblocks["FeedMetadata"] = {
     status: "running",
     trigger,
-    input: truncate(input, MAX_INPUT_PREVIEW),
+    input: typeof input === "string" ? truncate(input, MAX_INPUT_PREVIEW) : "",
     startedAt: String(startedAt),
   };
 
-  await safe(() => liveblocks.createFeed({ roomId, feedId: runId, metadata }));
-
-  const finish = async (error?: string): Promise<RunTrace> => {
-    clearTimeout(timeout);
-
-    const failedNode = [...messages.values()].find(
-      (message) => message.status === "error"
-    );
-    const finalError = error ?? failedNode?.error;
-    const completedAt = Date.now();
-    const finalMetadata: Liveblocks["FeedMetadata"] = {
-      ...metadata,
-      status: finalError ? "error" : "complete",
-      completedAt: String(completedAt),
-      ...(finalError ? { error: finalError } : {}),
-    };
-
-    await safe(() =>
-      liveblocks.updateFeed({ roomId, feedId: runId, metadata: finalMetadata })
-    );
-
-    const outputMessage = [...messages.values()].find(
-      (message) =>
-        message.nodeType === "output" && message.status === "complete"
-    );
-
-    return {
-      runId,
-      status: finalMetadata.status,
-      trigger,
-      input,
-      startedAt,
-      completedAt,
-      ...(finalError ? { error: finalError } : {}),
-      output: outputMessage
-        ? getRunOutput(outputMessage.outputs)
-        : createEmptyOutput(outputProperties),
-      nodes: [...messages.values()].sort((a, b) => a.startedAt - b.startedAt),
-    };
-  };
-
-  const { nodes, edges } = await readWorkflowGraph(roomId);
-  const outputNode = nodes.find((node) => node.type === "output");
-  const outputProperties = outputNode
-    ? getOutputProperties(outputNode.data)
-    : [];
-  const reachable = getReachableNodeIds(nodes, edges);
-  const activeNodes = nodes.filter((node) => reachable.has(node.id));
-  const activeEdges = edges.filter(
-    (edge) =>
-      reachable.has(edge.source) &&
-      reachable.has(edge.target) &&
-      (edge.target !== outputNode?.id ||
-        outputProperties.some(
-          (property) => property.id === getOutputPropertyId(edge.targetHandle)
-        ))
-  );
-
-  if (!activeNodes.some((node) => node.id === INPUT_NODE_ID)) {
-    return finish("The workflow has no input node.");
+  function active(): void {
+    if (closed) throw new ExecutionError("Workflow execution has finished.");
+    checkAbort(signal);
   }
 
-  const order = topologicalOrder(activeNodes, activeEdges);
-
-  if (order === null) {
-    return finish("The workflow contains a cycle.");
-  }
-
-  /* ------------------------------ Feed writes ----------------------------- */
-
-  async function writeMessage(
-    data: NodeResultData,
-    existingId?: string
-  ): Promise<string | undefined> {
-    messages.set(data.nodeId, data);
-
-    if (existingId) {
-      await safe(() =>
-        liveblocks.updateFeedMessage({
-          roomId,
-          feedId: runId,
-          messageId: existingId,
-          data,
-        })
-      );
-      return existingId;
-    }
-
-    const created = await safe(() =>
-      liveblocks.createFeedMessage({ roomId, feedId: runId, data })
-    );
-    return created?.id;
-  }
-
-  /* ------------------------------- Execution ------------------------------ */
-
-  const results = new Map<string, Promise<NodeState | null>>();
-
-  for (const node of order) {
-    results.set(
-      node.id,
-      executeNode(node).catch((error: unknown) => {
-        // Unexpected failure outside of the per-node error handling.
-        console.error(`Node ${node.id} failed`, error);
-        return null;
-      })
-    );
-  }
-
-  async function executeNode(node: WorkflowNode): Promise<NodeState | null> {
-    if (node.type === "input") {
-      const state: NodeState = {
-        output: input,
-        answers: {},
-        rawAnswers: {},
-        firedHandles: new Set([OUT_HANDLE]),
-      };
-      const nodeStartedAt = Date.now();
-
-      await writeMessage({
-        nodeId: node.id,
-        nodeType: "input",
-        label: node.data.label,
-        status: "complete",
-        parentNodeIds: [],
-        input,
-        output: input,
-        firedHandles: [OUT_HANDLE],
-        durationMs: 0,
-        startedAt: nodeStartedAt,
-      });
-
-      return state;
-    }
-
-    // Wait for every parent to settle, whether or not it fired into us.
-    const incoming = activeEdges.filter((edge) => edge.target === node.id);
-    const parents = await Promise.all(
-      incoming.map(async (edge) => ({
-        edge,
-        state: await results.get(edge.source),
-      }))
-    );
-    const fired = parents.filter(
-      ({ edge, state }) =>
-        state != null &&
-        edge.sourceHandle != null &&
-        state.firedHandles.has(edge.sourceHandle)
-    );
-
-    // `any`: at least one incoming handle fired (OR). `all`: every incoming
-    // handle fired (AND). Parents that never ran count as not fired.
-    const requireAll = getActivation(node.data) === "all";
-
-    if (fired.length === 0 || (requireAll && fired.length < incoming.length)) {
-      return null;
-    }
-
-    // Join fired parents: outputs concatenated (deduplicated per parent),
-    // answers merged (later parents win on conflicting ids).
-    const parentNodeIds = [...new Set(fired.map(({ edge }) => edge.source))];
-    const nodeInput = parentNodeIds
-      .map((id) => fired.find(({ edge }) => edge.source === id)!.state!.output)
-      .filter((text) => text.length > 0)
-      .join("\n\n");
-    const answers: Record<string, AnswerValue> = {};
-    const rawAnswers: Record<string, Answer> = {};
-
-    for (const { state } of fired) {
-      Object.assign(answers, state!.answers);
-      Object.assign(rawAnswers, state!.rawAnswers);
-    }
-
-    const nodeStartedAt = Date.now();
-    const base: NodeResultData = {
-      nodeId: node.id,
-      nodeType: node.type,
-      label: node.data.label,
-      status: "running",
-      parentNodeIds,
-      activation: requireAll ? "all" : "any",
-      input: nodeInput,
-      startedAt: nodeStartedAt,
-    };
-
-    if (abort.signal.aborted) {
-      await writeMessage({
-        ...base,
-        status: "error",
-        error: `Run exceeded ${RUN_TIMEOUT_MS / 1000}s.`,
-        durationMs: 0,
-      });
-      return null;
-    }
-
-    if (limitReached || ++executions > MAX_NODE_EXECUTIONS) {
-      limitReached = true;
-      await writeMessage({
-        ...base,
-        status: "error",
-        error: `Run exceeded ${MAX_NODE_EXECUTIONS} node executions.`,
-        durationMs: 0,
-      });
-      return null;
-    }
-
-    const messageId = await writeMessage(base);
-
+  async function feed<T>(operation: (requestSignal: AbortSignal) => Promise<T>): Promise<T | undefined> {
+    active();
     try {
-      if (node.type === "jev") {
-        return await executeJev(node, base, messageId, {
-          input: nodeInput,
-          answers,
-          rawAnswers,
-        });
-      }
-
-      if (node.type === "llm") {
-        return await executeLlm(node, base, messageId, {
-          input: nodeInput,
-          answers,
-          rawAnswers,
-        });
-      }
-
-      const properties = getOutputProperties(node.data);
-      const outputs = createEmptyOutput(properties);
-      const seen = new Map<string, Set<string>>();
-
-      for (const { edge, state } of fired) {
-        const property = properties.find(
-          ({ id }) => id === getOutputPropertyId(edge.targetHandle)
-        );
-        if (!property || !state?.output) continue;
-        const sources = seen.get(property.id) ?? new Set<string>();
-        if (sources.has(edge.source)) continue;
-        sources.add(edge.source);
-        seen.set(property.id, sources);
-        outputs[property.name].push(state.output);
-      }
-
-      return await executeOutput(base, messageId, outputs, {
-        answers,
-        rawAnswers,
-      });
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : "Unknown error";
-      await writeMessage(
-        {
-          ...base,
-          status: "error",
-          error: reason,
-          durationMs: Date.now() - nodeStartedAt,
-        },
-        messageId
-      );
-      return null;
+      return await boundedOperation(operation, FEED_TIMEOUT_MS, signal);
+    } catch {
+      checkAbort(signal);
+      // The trace remains available even if the feed service is unavailable.
+      return undefined;
     }
   }
 
-  async function executeJev(
-    node: JevNode,
-    base: NodeResultData,
-    messageId: string | undefined,
-    context: Pick<NodeState, "answers" | "rawAnswers"> & { input: string }
-  ): Promise<NodeState> {
-    // Upstream answers are exposed in the state so later questions can refer
-    // to them by id, as recommended in the TypeSafe docs.
-    const state: JevState = { input: context.input };
-
-    for (const [id, answer] of Object.entries(context.answers)) {
-      state[id] = answer.value;
+  async function writeMessage(data: NodeResultData): Promise<void> {
+    active();
+    const size = jsonSize(data, MAX_NODE_TRACE_CHARS, "Node trace");
+    const nextOutputSize = data.nodeType === "output" && data.outputs
+      ? jsonSize(data.outputs, MAX_NODE_TRACE_CHARS, "Run output")
+      : outputSize;
+    const nextTraceSize = traceSize - (messageSizes.get(data.nodeId) ?? 0) + size - outputSize + nextOutputSize;
+    checkLimit(nextTraceSize, MAX_RUN_TRACE_CHARS, "Run trace");
+    budget.feedWrite(size);
+    traceSize = nextTraceSize;
+    outputSize = nextOutputSize;
+    messageSizes.set(data.nodeId, size);
+    messages.set(data.nodeId, data);
+    const messageId = messageIds.get(data.nodeId);
+    if (messageId) {
+      await feed((requestSignal) => liveblocks!.updateFeedMessage(
+        { roomId, feedId: runId, messageId, data }, { signal: requestSignal }
+      ));
+    } else {
+      // A deterministic ID avoids duplicate messages after an ambiguous timeout.
+      const id = `${runId}-${data.nodeId}`;
+      messageIds.set(data.nodeId, id);
+      await feed((requestSignal) => liveblocks!.createFeedMessage(
+        { roomId, feedId: runId, id, data }, { signal: requestSignal }
+      ));
     }
+    active();
+  }
 
-    const result = await askJev(node.data, state);
-    const firedHandles = new Set<string>([ANY_HANDLE]);
-    const answers = { ...context.answers };
-    const rawAnswers = { ...context.rawAnswers, ...result.answers };
-    const questionCount = Object.keys(result.answers).length;
-
-    for (const question of node.data.questions) {
-      const answer = result.answers[question.id];
-
-      if (!answer) {
-        continue;
-      }
-
-      const { handleKey, value } = resolveAnswer(question, answer);
-      firedHandles.add(questionHandleId(question.id, handleKey));
-      answers[question.id] = value;
+  async function provider<T>(operation: () => Promise<T>): Promise<T> {
+    active();
+    while (providerTasks.size >= MAX_PROVIDER_CONCURRENCY) {
+      await abortable(Promise.race(providerTasks), signal);
+      active();
     }
+    const task = abortable(operation(), signal);
+    providerTasks.add(task);
+    try {
+      return await task;
+    } finally {
+      providerTasks.delete(task);
+    }
+  }
 
-    await writeMessage(
-      {
-        ...base,
-        status: questionCount === 0 ? "skipped" : "complete",
-        output: context.input,
-        answers: result.answers,
-        firedHandles: [...firedHandles],
-        mock: result.mock,
-        model: result.model,
-        durationMs: Date.now() - base.startedAt,
-      },
-      messageId
+  try {
+    if (typeof input !== "string") throw new ExecutionError("Run input must be text.");
+    checkLimit(input.length, MAX_INPUT_CHARS, "Run input");
+    traceSize += jsonSize(input, MAX_RUN_TRACE_CHARS, "Run input");
+    liveblocks = getLiveblocks();
+    await feed((requestSignal) => liveblocks!.createFeed(
+      { roomId, feedId: runId, metadata }, { signal: requestSignal }
+    ));
+    const snapshot = await boundedOperation(
+      (requestSignal) => readWorkflowGraph(roomId, requestSignal), STORAGE_TIMEOUT_MS, signal
     );
+    active();
+    const { nodes, edges } = validateWorkflowGraph(snapshot);
+    const outputNode = nodes.find((node) => node.type === "output");
+    if (!outputNode || outputNode.type !== "output") throw new ExecutionError("Workflow output is missing.");
+    outputProperties = getOutputProperties(outputNode.data);
+    const reachable = getReachableNodeIds(nodes, edges);
+    const activeNodes = nodes.filter((node) => reachable.has(node.id));
+    const activeEdges = edges.filter((edge) => reachable.has(edge.source) && reachable.has(edge.target));
+    const order = topologicalOrder(activeNodes, activeEdges)!;
 
-    return { output: context.input, answers, rawAnswers, firedHandles };
-  }
-
-  async function executeLlm(
-    node: LlmNode,
-    base: NodeResultData,
-    messageId: string | undefined,
-    context: Pick<NodeState, "answers" | "rawAnswers"> & { input: string }
-  ): Promise<NodeState> {
-    const prompt = renderTemplate(node.data.prompt, context).trim();
-    const system = renderTemplate(node.data.system, context).trim();
-
-    if (prompt === "") {
-      await writeMessage(
-        {
-          ...base,
-          status: "skipped",
-          output: context.input,
-          firedHandles: [OUT_HANDLE],
-          durationMs: Date.now() - base.startedAt,
-        },
-        messageId
-      );
-
-      return {
-        output: context.input,
-        answers: context.answers,
-        rawAnswers: context.rawAnswers,
-        firedHandles: new Set([OUT_HANDLE]),
-      };
-    }
-
-    let lastWrite = 0;
-    let pending: Promise<unknown> = Promise.resolve();
-
-    const result = await runLlm({
-      system,
-      prompt,
-      model: node.data.model,
-      signal: abort.signal,
-      onChunk: (text) => {
-        const now = Date.now();
-
-        if (now - lastWrite < STREAM_THROTTLE_MS) {
-          return;
+    async function executeNode(node: WorkflowNode): Promise<NodeState | null> {
+      const nodeStartedAt = Date.now();
+      let base: NodeResultData | undefined;
+      try {
+        active();
+        if (node.type === "input") {
+          budget.text(input.length);
+          await writeMessage({
+            nodeId: node.id, nodeType: "input", label: node.data.label,
+            status: "complete", parentNodeIds: [], input, output: input,
+            firedHandles: [OUT_HANDLE], durationMs: 0, startedAt: nodeStartedAt,
+          });
+          return { output: input, answers: {}, firedHandles: new Set([OUT_HANDLE]) };
         }
-
-        lastWrite = now;
-        pending = pending.then(() =>
-          writeMessage(
-            {
-              ...base,
-              status: "running",
-              output: text,
-              model: node.data.model,
+        const incoming = activeEdges.filter((edge) => edge.target === node.id);
+        const parents = await abortable(Promise.all(incoming.map(async (edge) => ({
+          edge, state: await results.get(edge.source),
+        }))), signal);
+        active();
+        const fired = parents.filter(({ edge, state }) => state?.firedHandles.has(edge.sourceHandle!));
+        const requireAll = getActivation(node.data) === "all";
+        if (fired.length === 0 || (requireAll && fired.length < incoming.length)) return null;
+        if (++executions > MAX_NODE_EXECUTIONS) {
+          throw new ExecutionError(`Run exceeded ${MAX_NODE_EXECUTIONS} node executions.`);
+        }
+        const parentNodeIds = [...new Set(fired.map(({ edge }) => edge.source))];
+        const parentTexts = parentNodeIds.map((id) => fired.find(({ edge }) => edge.source === id)!.state!.output);
+        base = {
+          nodeId: node.id, nodeType: node.type, label: node.data.label,
+          status: "running", parentNodeIds, activation: requireAll ? "all" : "any",
+          input: "", startedAt: nodeStartedAt,
+        };
+        const joinBaseSize = jsonSize({ ...base, ...(node.type === "jev" ? { output: "" } : {}) }, MAX_NODE_TRACE_CHARS, "Node trace");
+        // Reserve both the input and Jev's pass-through output before a join or call.
+        const nodeInput = boundedJoin(parentTexts, budget, (serializedSize) => {
+          const size = joinBaseSize + (serializedSize - 2) * (node.type === "jev" ? 2 : 1);
+          checkLimit(size, MAX_NODE_TRACE_CHARS, "Node trace");
+          checkLimit(traceSize + size, MAX_RUN_TRACE_CHARS, "Run trace");
+        });
+        base.input = nodeInput;
+        const answers: Record<string, AnswerValue> = {};
+        for (const { state } of fired) Object.assign(answers, state!.answers);
+        await writeMessage(base);
+        active();
+        if (node.type === "jev") {
+          const state: JevState = { input: nodeInput };
+          for (const [id, answer] of Object.entries(answers)) state[id] = answer.value;
+          const requestSize = jsonSize({ state, questions: toTypeSafeQuestions(node.data.questions) }, MAX_NODE_PROMPT_CHARS, "Jev request");
+          budget.prompt(requestSize);
+          const result = await provider(() => askJev(node.data, state, signal));
+          active();
+          const firedHandles = new Set([ANY_HANDLE]);
+          for (const question of node.data.questions) {
+            const resolved = resolveAnswer(question, result.answers[question.id]);
+            firedHandles.add(questionHandleId(question.id, resolved.handleKey));
+            answers[question.id] = resolved.value;
+          }
+          await writeMessage({
+            ...base, status: "complete", output: nodeInput, answers: result.answers,
+            firedHandles: [...firedHandles], mock: result.mock, model: result.model,
+            durationMs: Date.now() - nodeStartedAt,
+          });
+          return { output: nodeInput, answers, firedHandles };
+        }
+        if (node.type === "llm") {
+          const [prompt, system] = boundedTemplates([node.data.prompt, node.data.system], { input: nodeInput, answers }, budget);
+          if (!prompt) {
+            await writeMessage({ ...base, status: "skipped", output: nodeInput, firedHandles: [OUT_HANDLE], durationMs: Date.now() - nodeStartedAt });
+            return { output: nodeInput, answers, firedHandles: new Set([OUT_HANDLE]) };
+          }
+          let lastWrite = Date.now();
+          const streamBaseSize = jsonSize({ ...base, output: "", model: node.data.model }, MAX_NODE_TRACE_CHARS, "Node trace");
+          let streamOutputSize = 0;
+          const result = await provider(() => runLlm({
+            prompt, system, model: node.data.model, signal,
+            reserveOutput: (delta) => {
+              active();
+              budget.text(delta.length);
+              streamOutputSize += jsonSize(delta, MAX_NODE_TRACE_CHARS, "LLM output") - 2;
+              const messageSize = streamBaseSize + streamOutputSize;
+              checkLimit(messageSize, MAX_NODE_TRACE_CHARS, "Node trace");
+              checkLimit(traceSize - (messageSizes.get(node.id) ?? 0) + messageSize, MAX_RUN_TRACE_CHARS, "Run trace");
             },
-            messageId
-          )
-        );
-      },
-    });
+            onChunk: async (text) => {
+              active();
+              if (Date.now() - lastWrite < STREAM_THROTTLE_MS) return;
+              lastWrite = Date.now();
+              // Backpressure: at most one write per node, no unbounded promise queue.
+              await writeMessage({ ...base!, status: "running", output: text, model: node.data.model });
+            },
+          }));
+          active();
+          await writeMessage({
+            ...base, status: "complete", output: result.text, firedHandles: [OUT_HANDLE],
+            mock: result.mock, model: result.model, durationMs: Date.now() - nodeStartedAt,
+          });
+          return { output: result.text, answers, firedHandles: new Set([OUT_HANDLE]) };
+        }
+        const properties = getOutputProperties(node.data);
+        const outputs = createEmptyOutput(properties);
+        const seen = new Map<string, Set<string>>();
+        for (const { edge, state } of fired) {
+          const property = properties.find(({ id }) => id === getOutputPropertyId(edge.targetHandle))!;
+          if (!state?.output) continue;
+          const sources = seen.get(property.id) ?? new Set<string>();
+          if (sources.has(edge.source)) continue;
+          sources.add(edge.source);
+          seen.set(property.id, sources);
+          outputs[property.name].push(state.output);
+        }
+        const outputBaseSize = jsonSize({ ...base, status: "complete", output: "", outputs, firedHandles: [] }, MAX_NODE_TRACE_CHARS, "Node trace");
+        const outputsSize = jsonSize(outputs, MAX_NODE_TRACE_CHARS, "Run output");
+        const joined = boundedJoin(Object.values(outputs).flat(), budget, (serializedSize) => {
+          const size = outputBaseSize + serializedSize - 2;
+          checkLimit(size, MAX_NODE_TRACE_CHARS, "Node trace");
+          checkLimit(traceSize - (messageSizes.get(node.id) ?? 0) + size + outputsSize, MAX_RUN_TRACE_CHARS, "Run trace");
+        });
+        await writeMessage({
+          ...base, status: "complete", output: joined, outputs, firedHandles: [],
+          durationMs: Date.now() - nodeStartedAt,
+        });
+        return { output: joined, answers, firedHandles: new Set() };
+      } catch (failure) {
+        if (!closed) {
+          // Keep a bounded, actionable error even when the proposed full message
+          // failed its trace budget before being inserted into the map.
+          const previous = messages.get(node.id);
+          const failed: NodeResultData = {
+            ...(previous ?? {
+              nodeId: node.id, nodeType: node.type, label: node.data.label,
+              parentNodeIds: [], input: "", startedAt: nodeStartedAt,
+            }),
+            status: "error", error: publicExecutionError(failure),
+            durationMs: Date.now() - nodeStartedAt,
+          };
+          messages.set(node.id, failed);
+        }
+        throw failure;
+      }
+    }
 
-    await pending;
-
-    await writeMessage(
-      {
-        ...base,
-        status: "complete",
-        output: result.text,
-        firedHandles: [OUT_HANDLE],
-        mock: result.mock,
-        model: result.model,
-        durationMs: Date.now() - base.startedAt,
-      },
-      messageId
-    );
-
-    return {
-      output: result.text,
-      answers: context.answers,
-      rawAnswers: context.rawAnswers,
-      firedHandles: new Set([OUT_HANDLE]),
-    };
+    for (const node of order) {
+      const task = executeNode(node);
+      // Observe immediately: a parent may fail before the aggregate is installed.
+      void task.catch(() => {});
+      results.set(node.id, task);
+    }
+    await abortable(Promise.all(results.values()), signal);
+    active();
+  } catch (failure) {
+    error = publicExecutionError(failure);
+  } finally {
+    // Seal local state before aborting, so a late provider/snapshot cannot publish.
+    closed = true;
+    runDeadline.close();
+    await Promise.allSettled(results.values());
   }
 
-  async function executeOutput(
-    base: NodeResultData,
-    messageId: string | undefined,
-    outputs: WorkflowOutput,
-    context: Pick<NodeState, "answers" | "rawAnswers">
-  ): Promise<NodeState> {
-    const joined = Object.values(outputs).flat().join("\n\n");
-
-    await writeMessage(
-      {
-        ...base,
-        status: "complete",
-        output: joined,
-        outputs,
-        firedHandles: [],
-        durationMs: Date.now() - base.startedAt,
-      },
-      messageId
-    );
-
-    return {
-      output: joined,
-      answers: context.answers,
-      rawAnswers: context.rawAnswers,
-      firedHandles: new Set(),
-    };
+  const completedAt = Date.now();
+  if (error) {
+    for (const [id, message] of messages) {
+      if (message.status === "running") messages.set(id, {
+        ...message, status: "error", error, durationMs: completedAt - message.startedAt,
+      });
+    }
   }
-
-  await Promise.all([...results.values()]);
-
-  return finish(
-    limitReached
-      ? `Run exceeded ${MAX_NODE_EXECUTIONS} node executions.`
-      : undefined
-  );
+  const finalMetadata: Liveblocks["FeedMetadata"] = {
+    ...metadata, status: error ? "error" : "complete", completedAt: String(completedAt),
+    ...(error ? { error } : {}),
+  };
+  if (liveblocks) {
+    // One shared cleanup window, not a per-message timeout multiplied by nodes.
+    try {
+      await boundedOperation(async (cleanupSignal) => {
+        const failures = [...messages.values()].filter((message) => message.status === "error");
+        let index = 0;
+        try {
+          await boundedOperation(async (messageSignal) => {
+            await Promise.all(Array.from({ length: Math.min(MAX_PROVIDER_CONCURRENCY, failures.length) }, async () => {
+              while (index < failures.length && !messageSignal.aborted) {
+                const data = failures[index++];
+                const id = messageIds.get(data.nodeId);
+                try {
+                  if (id) await abortable(liveblocks!.updateFeedMessage(
+                    { roomId, feedId: runId, messageId: id, data }, { signal: messageSignal }
+                  ), messageSignal);
+                  else await abortable(liveblocks!.createFeedMessage(
+                    { roomId, feedId: runId, id: `${runId}-${data.nodeId}`, data }, { signal: messageSignal }
+                  ), messageSignal);
+                } catch { /* The terminal feed update retains its own cleanup time. */ }
+              }
+            }));
+          }, FEED_TIMEOUT_MS, cleanupSignal);
+        } catch { /* Always attempt terminal metadata, even if message writes hang. */ }
+        checkAbort(cleanupSignal);
+        await abortable(liveblocks!.updateFeed({ roomId, feedId: runId, metadata: finalMetadata }, { signal: cleanupSignal }), cleanupSignal);
+      }, FEED_FINALIZE_TIMEOUT_MS);
+    } catch { /* Never expose transport errors or let cleanup hold the run open. */ }
+  }
+  const outputMessage = [...messages.values()].find((message) => message.nodeType === "output" && message.status === "complete");
+  return {
+    runId, status: error ? "error" : "complete", trigger,
+    input: typeof input === "string" && input.length <= MAX_INPUT_CHARS ? input : "",
+    startedAt, completedAt, ...(error ? { error } : {}),
+    output: outputMessage ? getRunOutput(outputMessage.outputs) : createEmptyOutput(outputProperties),
+    nodes: [...messages.values()].sort((a, b) => a.startedAt - b.startedAt),
+  };
 }
 
-/**
- * Picks which handle an answer fires and the template-friendly value.
- */
-function resolveAnswer(
-  question: QuestionDef,
-  answer: Answer
-): { handleKey: string; value: AnswerValue } {
+function resolveAnswer(question: QuestionDef, answer: Answer): { handleKey: string; value: AnswerValue } {
   switch (answer.type) {
     case "choice":
-      return {
-        handleKey: answer.choice,
-        value: {
-          value: answer.choice,
-          probability: answer.probabilities[answer.choice] ?? 0,
-          confidence: answer.confidence,
-        },
-      };
+      return { handleKey: answer.choice, value: {
+        value: answer.choice, probability: answer.probabilities[answer.choice] ?? 0, confidence: answer.confidence,
+      } };
     case "score": {
-      const levelKey =
-        question.type === "score"
-          ? (question.levels[answer.level]?.key ?? String(answer.level))
-          : String(answer.level);
-      return {
-        handleKey: String(answer.level),
-        value: {
-          value: levelKey,
-          probability: answer.probabilities[String(answer.level)] ?? 0,
-          confidence: answer.confidence,
-        },
-      };
+      const levelKey = question.type === "score" ? question.levels[answer.level].key : String(answer.level);
+      return { handleKey: String(answer.level), value: {
+        value: levelKey, probability: answer.probabilities[String(answer.level)] ?? 0, confidence: answer.confidence,
+      } };
     }
     case "noul": {
       const yes = answer.noul >= answer.threshold;
-      return {
-        handleKey: yes ? "yes" : "no",
-        value: {
-          value: yes ? "yes" : "no",
-          probability: answer.noul,
-          confidence: Math.abs(answer.noul - 0.5) * 2,
-        },
-      };
+      return { handleKey: yes ? "yes" : "no", value: {
+        value: yes ? "yes" : "no", probability: answer.noul, confidence: Math.abs(answer.noul - 0.5) * 2,
+      } };
     }
-  }
-}
-
-/**
- * Feed writes should never take the run down: log and continue. (The local
- * Liveblocks dev server stubs the feed REST endpoints, for instance.)
- */
-async function safe<T>(fn: () => Promise<T>): Promise<T | undefined> {
-  try {
-    return await fn();
-  } catch (error) {
-    console.error("Feed write failed", error);
-    return undefined;
   }
 }

@@ -3,7 +3,7 @@
 import { AvatarStack } from "@liveblocks/react-ui";
 import { ChevronRight, Plus, Workflow } from "lucide-react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
 import { HelpButton } from "../../components/help-button";
 import { createWorkflowAction, renameWorkflowAction } from "./actions";
@@ -11,22 +11,16 @@ import type { WorkflowSummary } from "./server/liveblocks";
 
 export function WorkflowHeader({
   workflow,
-  exampleId,
 }: {
   workflow: WorkflowSummary;
-  exampleId: string | null;
 }) {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const [name, setName] = useState(workflow.name);
   const [isPending, startTransition] = useTransition();
 
   useEffect(() => {
     setName(workflow.name);
   }, [workflow.name]);
-
-  const search = searchParams.toString();
-  const suffix = search ? `?${search}` : "";
 
   function commitName() {
     const next = name.trim() || "Untitled workflow";
@@ -37,7 +31,7 @@ export function WorkflowHeader({
     }
 
     startTransition(async () => {
-      await renameWorkflowAction(workflow.workflowId, exampleId, next);
+      await renameWorkflowAction(workflow.workflowId, next);
       router.refresh();
     });
   }
@@ -45,14 +39,14 @@ export function WorkflowHeader({
   return (
     <header className="workspace-header">
       <Link
-        href={`/${suffix}`}
+        href="/"
         className="brand-mark shrink-0"
         aria-label="All workflows"
       >
         <Workflow className="size-4" aria-hidden />
       </Link>
       <Link
-        href={`/${suffix}`}
+        href="/"
         className="hidden text-[13px] text-neutral-500 transition-colors hover:text-neutral-900 lg:block"
       >
         Workflows
@@ -70,6 +64,7 @@ export function WorkflowHeader({
           aria-label="Workflow name"
           size={1}
           value={name}
+          maxLength={120}
           disabled={isPending}
           onChange={(event) => setName(event.target.value)}
           onBlur={commitName}
@@ -94,11 +89,17 @@ export function WorkflowHeader({
           title="New workflow"
           aria-label="New workflow"
           disabled={isPending}
-          onClick={() => startTransition(() => createWorkflowAction(exampleId))}
+          onClick={() => startTransition(() => createWorkflowAction())}
           className="icon-button"
         >
           <Plus className="size-4" />
         </button>
+        <Link
+          href="/api/auth/signout?callbackUrl=%2F"
+          className="px-1 text-xs text-neutral-600 hover:text-neutral-900"
+        >
+          Sign out
+        </Link>
         <HelpButton />
       </div>
     </header>

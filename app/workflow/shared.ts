@@ -1,8 +1,8 @@
 import type { Edge, Node } from "@xyflow/react";
 import { nanoid } from "nanoid";
 
-export const EXAMPLE_ID = "nextjs-typesafe-workflow-builder";
-export const ROOM_ID_PREFIX = `liveblocks:examples:${EXAMPLE_ID}`;
+export const WORKFLOW_APP_ID = "jev-workflows";
+export const ROOM_ID_PREFIX = "jev:workflows";
 export const FLOW_STORAGE_KEY = "flow" as const;
 // Edges use React Flow's built-in smoothstep renderer.
 export const WORKFLOW_EDGE_TYPE = "smoothstep" as const;

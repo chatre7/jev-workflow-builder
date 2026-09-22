@@ -2,7 +2,6 @@
 
 import { ChevronRight, Plus, Workflow as WorkflowIcon } from "lucide-react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
 import { useTransition } from "react";
 import { HelpButton } from "../../components/help-button";
 import { createWorkflowAction } from "./actions";
@@ -24,15 +23,10 @@ function formatRelative(timestamp: number): string {
 
 export function WorkflowList({
   workflows,
-  exampleId,
 }: {
   workflows: WorkflowSummary[];
-  exampleId: string | null;
 }) {
-  const searchParams = useSearchParams();
   const [isCreating, startCreating] = useTransition();
-  const search = searchParams.toString();
-  const suffix = search ? `?${search}` : "";
 
   return (
     <main className="workflow-library min-h-dvh">
@@ -45,7 +39,15 @@ export function WorkflowList({
             Workflows
           </span>
         </div>
-        <HelpButton />
+        <div className="flex items-center gap-3">
+          <Link
+            href="/api/auth/signout?callbackUrl=%2F"
+            className="text-xs text-neutral-600 hover:text-neutral-900"
+          >
+            Sign out
+          </Link>
+          <HelpButton />
+        </div>
       </nav>
       <div className="mx-auto w-full max-w-3xl px-4 py-6">
         <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -60,7 +62,7 @@ export function WorkflowList({
           <button
             type="button"
             disabled={isCreating}
-            onClick={() => startCreating(() => createWorkflowAction(exampleId))}
+            onClick={() => startCreating(() => createWorkflowAction())}
             className="primary-button shrink-0"
           >
             <Plus className="size-3.5" />
@@ -80,7 +82,7 @@ export function WorkflowList({
               className="min-w-0 border-b border-neutral-100 last:border-b-0"
             >
               <Link
-                href={`/w/${workflow.workflowId}${suffix}`}
+                href={`/w/${workflow.workflowId}`}
                 className="workflow-list-row group flex items-center gap-2.5 px-3 py-2"
               >
                 <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-violet-50 text-violet-600">

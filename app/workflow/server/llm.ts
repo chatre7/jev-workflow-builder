@@ -1,73 +1,104 @@
 import "server-only";
 
+import {
+  ExecutionError,
+  MAX_LLM_OUTPUT_CHARS,
+  MAX_LLM_OUTPUT_TOKENS,
+  MAX_NODE_PROMPT_CHARS,
+  abortable,
+  assertAllowedModel,
+  checkAbort,
+  checkLimit,
+} from "./execution-policy";
+
 export type LlmRunOptions = {
   system: string;
   prompt: string;
   model: string;
-  // Called with the full text so far. Throttled by the caller.
+  // Reserve the delta against the run budget before accumulating or publishing.
+  reserveOutput: (delta: string) => void;
   onChunk: (text: string) => void | Promise<void>;
-  signal?: AbortSignal;
+  signal: AbortSignal;
 };
 
 export type LlmResult = { text: string; mock: boolean; model: string };
 
 export async function runLlm(options: LlmRunOptions): Promise<LlmResult> {
-  if (!process.env.AI_GATEWAY_API_KEY) {
-    return streamMockReply(options);
+  checkAbort(options.signal);
+  assertAllowedModel(options.model);
+  checkLimit(options.prompt.length + options.system.length, MAX_NODE_PROMPT_CHARS, "Node prompt");
+  const controller = new AbortController();
+  const cancel = () => controller.abort(options.signal.reason);
+  options.signal.addEventListener("abort", cancel, { once: true });
+  const signal = controller.signal;
+  let iterator: AsyncIterator<string> | undefined;
+  try {
+    if (!process.env.AI_GATEWAY_API_KEY) {
+      return await streamMockReply({ ...options, signal });
+    }
+    const { streamText } = await abortable(import("ai"), signal);
+    checkAbort(signal);
+    const result = streamText({
+      model: options.model,
+      system: options.system || undefined,
+      prompt: options.prompt,
+      abortSignal: signal,
+      maxOutputTokens: MAX_LLM_OUTPUT_TOKENS,
+      maxRetries: 0,
+      // Provider errors are handled below, never logged with request credentials.
+      onError: () => {},
+    });
+    iterator = result.textStream[Symbol.asyncIterator]();
+    let text = "";
+    while (true) {
+      const chunk = await abortable(iterator.next(), signal);
+      checkAbort(signal);
+      if (chunk.done) break;
+      checkLimit(text.length + chunk.value.length, MAX_LLM_OUTPUT_CHARS, "LLM output");
+      options.reserveOutput(chunk.value);
+      text += chunk.value;
+      await abortable(Promise.resolve(options.onChunk(text)), signal);
+    }
+    checkAbort(signal);
+    return { text, mock: false, model: options.model };
+  } catch (error) {
+    checkAbort(signal);
+    throw error instanceof ExecutionError
+      ? error
+      : new ExecutionError("LLM request failed. Check the gateway configuration and model availability.");
+  } finally {
+    controller.abort();
+    options.signal.removeEventListener("abort", cancel);
+    // An uncooperative iterator must not hold finalization or emit more chunks.
+    if (iterator?.return) void Promise.resolve(iterator.return()).catch(() => {});
   }
-
-  // Model ids like "openai/gpt-5.4-nano" are routed through the Vercel AI
-  // Gateway, authenticated with AI_GATEWAY_API_KEY.
-  const { streamText } = await import("ai");
-  const result = streamText({
-    model: options.model,
-    system: options.system || undefined,
-    prompt: options.prompt,
-    abortSignal: options.signal,
-  });
-
-  let text = "";
-
-  for await (const delta of result.textStream) {
-    text += delta;
-    await options.onChunk(text);
-  }
-
-  return { text, mock: false, model: options.model };
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Keyless fallback: streams a canned reply built from the resolved prompt, so
- * the rest of the workflow (and downstream Jev nodes) still has text to work
- * with.
- */
+/** Keyless, explicitly labelled local demonstration; cancellation is an error. */
 async function streamMockReply(options: LlmRunOptions): Promise<LlmResult> {
-  const firstLine =
-    options.prompt
-      .split("\n")
-      .map((line) => line.trim())
-      .find((line) => line.length > 0) ?? "the request";
+  checkAbort(options.signal);
+  const firstLine = options.prompt.match(/[^\r\n]*\S[^\r\n]*/)?.[0].trim() ?? "the request";
   const reply = [
     "Thanks for reaching out, and sorry for the trouble.",
     `Here is a mock reply for: "${firstLine.slice(0, 120)}".`,
     "Set AI_GATEWAY_API_KEY to stream a real model response through this node.",
   ].join(" ");
-  const words = reply.split(" ");
   let text = "";
-
-  for (const word of words) {
-    if (options.signal?.aborted) {
-      break;
+  for (const word of reply.split(" ")) {
+    checkAbort(options.signal);
+    const delta = (text ? " " : "") + word;
+    checkLimit(text.length + delta.length, MAX_LLM_OUTPUT_CHARS, "LLM output");
+    options.reserveOutput(delta);
+    text += delta;
+    await abortable(Promise.resolve(options.onChunk(text)), options.signal);
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const timer = setTimeout(resolve, 35);
+    try {
+      await abortable(promise, options.signal);
+    } finally {
+      clearTimeout(timer);
     }
-
-    text += (text ? " " : "") + word;
-    await options.onChunk(text);
-    await sleep(35);
   }
-
+  checkAbort(options.signal);
   return { text, mock: true, model: "mock" };
 }
