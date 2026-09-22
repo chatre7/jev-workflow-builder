@@ -33,20 +33,26 @@ export async function runLlm(options: LlmRunOptions): Promise<LlmResult> {
   const signal = controller.signal;
   let iterator: AsyncIterator<string> | undefined;
   try {
-    if (!process.env.AI_GATEWAY_API_KEY) {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
       return await streamMockReply({ ...options, signal });
     }
-    const { streamText } = await abortable(import("ai"), signal);
+    const [{ streamText }, { createOpenRouter }] = await abortable(
+      Promise.all([import("ai"), import("@openrouter/ai-sdk-provider")]),
+      signal
+    );
     checkAbort(signal);
+    const openrouter = createOpenRouter({ apiKey });
+    let streamFailed = false;
     const result = streamText({
-      model: options.model,
+      model: openrouter(options.model),
       system: options.system || undefined,
       prompt: options.prompt,
       abortSignal: signal,
       maxOutputTokens: MAX_LLM_OUTPUT_TOKENS,
       maxRetries: 0,
       // Provider errors are handled below, never logged with request credentials.
-      onError: () => {},
+      onError: () => { streamFailed = true; },
     });
     iterator = result.textStream[Symbol.asyncIterator]();
     let text = "";
@@ -60,12 +66,13 @@ export async function runLlm(options: LlmRunOptions): Promise<LlmResult> {
       await abortable(Promise.resolve(options.onChunk(text)), signal);
     }
     checkAbort(signal);
+    if (streamFailed) throw new Error("LLM provider stream failed.");
     return { text, mock: false, model: options.model };
   } catch (error) {
     checkAbort(signal);
     throw error instanceof ExecutionError
       ? error
-      : new ExecutionError("LLM request failed. Check the gateway configuration and model availability.");
+      : new ExecutionError("LLM request failed. Check your OpenRouter API key, credits, and model availability.");
   } finally {
     controller.abort();
     options.signal.removeEventListener("abort", cancel);
@@ -81,7 +88,7 @@ async function streamMockReply(options: LlmRunOptions): Promise<LlmResult> {
   const reply = [
     "Thanks for reaching out, and sorry for the trouble.",
     `Here is a mock reply for: "${firstLine.slice(0, 120)}".`,
-    "Set AI_GATEWAY_API_KEY to stream a real model response through this node.",
+    "Set OPENROUTER_API_KEY to stream a real model response through this node.",
   ].join(" ");
   let text = "";
   for (const word of reply.split(" ")) {

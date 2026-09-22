@@ -229,7 +229,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
         if (node.type === "jev") {
           const state: JevState = { input: nodeInput };
           for (const [id, answer] of Object.entries(answers)) state[id] = answer.value;
-          const requestSize = jsonSize({ state, questions: toTypeSafeQuestions(node.data.questions) }, MAX_NODE_PROMPT_CHARS, "Jev request");
+          const requestSize = jsonSize({ model: node.data.model, state, questions: toTypeSafeQuestions(node.data.questions) }, MAX_NODE_PROMPT_CHARS, "Jev request");
           budget.prompt(requestSize);
           const result = await provider(() => askJev(node.data, state, signal));
           active();

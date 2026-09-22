@@ -1,14 +1,5 @@
 import "server-only";
 
-import {
-  TypeSafeClient,
-  type ChoiceQuestion,
-  type Question,
-  type Questions,
-  type ScoreCriteria,
-  type ScoreQuestion,
-  type NoulQuestion,
-} from "@typesafe-ai/sdk";
 import type { Answer } from "../runs";
 import type { JevNodeData, QuestionDef } from "../shared";
 import {
@@ -16,6 +7,7 @@ import {
   MAX_IDENTIFIER_CHARS,
   MAX_NODE_PROMPT_CHARS,
   abortable,
+  assertAllowedJevModel,
   checkAbort,
   jsonSize,
 } from "./execution-policy";
@@ -37,62 +29,26 @@ export type JevResult = {
   mock: boolean;
 };
 
-let client: TypeSafeClient | null = null;
+type JevQuestion =
+  | { type: "choice"; instructions: string; criteria: Record<string, string | null> }
+  | { type: "score"; instructions: string; criteria: string[] }
+  | { type: "noul"; instructions: string };
 
-function getClient(): TypeSafeClient | null {
-  if (!process.env.TYPESAFE_API_KEY) {
-    return null;
-  }
-
-  client ??= new TypeSafeClient({
-    apiKey: process.env.TYPESAFE_API_KEY,
-    logLevel: "off",
-    retry: { maxRetries: 0 },
-    fetch: async (url, init) => {
-      const response = await fetch(url, init);
-      if (!response.body) return response;
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      try {
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          size += chunk.value.byteLength;
-          if (size > MAX_JEV_RESPONSE_BYTES) {
-            throw new ExecutionError("Jev returned an oversized response.");
-          }
-          chunks.push(chunk.value);
-        }
-        const bytes = new Uint8Array(size);
-        let offset = 0;
-        for (const chunk of chunks) {
-          bytes.set(chunk, offset);
-          offset += chunk.byteLength;
-        }
-        return new Response(bytes, { status: response.status, headers: response.headers });
-      } finally {
-        void reader.cancel().catch(() => {});
-      }
-    },
-  });
-
-  return client;
-}
+type JevResponse = { model?: unknown; answers?: unknown };
 
 /** Converts validated editor questions without dropping invalid/empty entries. */
-export function toTypeSafeQuestions(questions: QuestionDef[]): Questions {
+export function toTypeSafeQuestions(questions: QuestionDef[]): Record<string, JevQuestion> {
   validateQuestions(questions);
-  const result: Record<string, Question> = {};
+  const result: Record<string, JevQuestion> = {};
 
   for (const question of questions) {
-    const instructions = question.instructions.trim() || null;
+    const instructions = question.instructions.trim();
 
     switch (question.type) {
       case "choice": {
         const options = question.options;
 
-        const choice: ChoiceQuestion = {
+        const choice: JevQuestion = {
           type: "choice",
           instructions,
           criteria: Object.fromEntries(
@@ -106,16 +62,15 @@ export function toTypeSafeQuestions(questions: QuestionDef[]): Questions {
         break;
       }
       case "score": {
-        const [first, second, ...rest] = question.levels.map(
-          (level) => level.description.trim() || level.key || null
+        const criteria = question.levels.map(
+          (level) => level.description.trim() || level.key
         );
-        const criteria: ScoreCriteria = [first, second, ...rest];
-        const score: ScoreQuestion = { type: "score", instructions, criteria };
+        const score: JevQuestion = { type: "score", instructions, criteria };
         result[question.id] = score;
         break;
       }
       case "noul": {
-        const noul: NoulQuestion = { type: "noul", instructions };
+        const noul: JevQuestion = { type: "noul", instructions };
         result[question.id] = noul;
         break;
       }
@@ -131,34 +86,66 @@ export async function askJev(
   signal: AbortSignal
 ): Promise<JevResult> {
   checkAbort(signal);
+  assertAllowedJevModel(data.model);
   const questions = toTypeSafeQuestions(data.questions);
-  jsonSize({ state, questions }, MAX_NODE_PROMPT_CHARS, "Jev request");
-  const typesafe = getClient();
-  if (!typesafe) {
+  const payload = { model: data.model, state, questions };
+  jsonSize(payload, MAX_NODE_PROMPT_CHARS, "Jev request");
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
     const result = mockJev(data.questions, state);
     checkAbort(signal);
     return result;
   }
   try {
-    const response = await abortable(typesafe.systemOne(
-      { state, questions },
-      { signal, timeout: RUN_TIMEOUT_MS, retry: { maxRetries: 0 } }
-    ), signal);
+    const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(RUN_TIMEOUT_MS)]);
+    const httpResponse = await abortable(fetch("https://openrouter.ai/api/alpha/decisions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: requestSignal,
+      redirect: "error",
+    }), requestSignal);
+    if (!httpResponse.ok) {
+      void httpResponse.body?.cancel().catch(() => {});
+      throw new Error("OpenRouter rejected the Jev request.");
+    }
+    if (!httpResponse.body) throw new ExecutionError("Jev returned an invalid response.");
+    const reader = httpResponse.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    let response: JevResponse;
+    try {
+      while (true) {
+        const chunk = await abortable(reader.read(), requestSignal);
+        if (chunk.done) break;
+        size += chunk.value.byteLength;
+        if (size > MAX_JEV_RESPONSE_BYTES) {
+          throw new ExecutionError("Jev returned an oversized response.");
+        }
+        chunks.push(chunk.value);
+      }
+      response = JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
+    } finally {
+      void reader.cancel().catch(() => {});
+    }
     checkAbort(signal);
-    if (!response || !response.answers || typeof response.model !== "string" || response.model.length > MAX_IDENTIFIER_CHARS) {
+    if (!response || typeof response !== "object" || Array.isArray(response) ||
+      !response.answers || typeof response.answers !== "object" || Array.isArray(response.answers) ||
+      typeof response.model !== "string" || response.model.length > MAX_IDENTIFIER_CHARS) {
       throw new ExecutionError("Jev returned an invalid response.");
     }
+    const responseAnswers = response.answers as Record<string, Partial<Answer> | undefined>;
     const answers: Record<string, Answer> = {};
     for (const question of data.questions) {
-      const answer = response.answers[question.id];
-      if (!answer || answer.type !== question.type) {
+      const answer = responseAnswers[question.id];
+      if (!answer || typeof answer !== "object" || Array.isArray(answer) || answer.type !== question.type) {
         throw new ExecutionError("Jev did not return a valid answer for every question.");
       }
       if (question.type === "noul" && answer.type === "noul") {
         probability(answer.noul);
         answers[question.id] = { type: "noul", noul: answer.noul, threshold: question.threshold };
       } else if (question.type === "choice" && answer.type === "choice") {
-        if (!question.options.some((option) => option.key === answer.choice)) {
+        if (typeof answer.choice !== "string" || !question.options.some((option) => option.key === answer.choice)) {
           throw new ExecutionError("Jev returned a choice outside the configured criteria.");
         }
         probability(answer.confidence);
@@ -169,7 +156,7 @@ export async function askJev(
           probabilities: readProbabilities(answer.probabilities, question.options.map((option) => option.key)),
         };
       } else if (question.type === "score" && answer.type === "score") {
-        if (!Number.isFinite(answer.score) || answer.score < 0 || answer.score > question.levels.length - 1) {
+        if (typeof answer.score !== "number" || !Number.isFinite(answer.score) || answer.score < 0 || answer.score > question.levels.length - 1) {
           throw new ExecutionError("Jev returned a score outside the configured criteria.");
         }
         probability(answer.confidence);
@@ -187,7 +174,7 @@ export async function askJev(
     checkAbort(signal);
     throw error instanceof ExecutionError
       ? error
-      : new ExecutionError("Jev request failed. Check the TypeSafe configuration and provider availability.");
+      : new ExecutionError("Jev request failed. Check your OpenRouter API key, credits, and model availability.");
   }
 }
 

@@ -41,6 +41,7 @@ import {
 } from "./runs";
 import {
   IN_HANDLE,
+  JEV_MODELS,
   LLM_MODEL_GROUPS,
   LLM_MODELS,
   createOutputProperty,
@@ -606,26 +607,28 @@ function QuestionEditor({
   );
 }
 
-const JevNodeView = memo(({ id, data, selected }: NodeProps<JevNode>) => {
-  const { updateNodeData } = useReactFlow<WorkflowNode>();
-  const { results } = useRun();
-  const result = results.get(id);
-  const node: JevNode = { id, type: "jev", position: { x: 0, y: 0 }, data };
+const JevNodeView=memo(({ id,data,selected }: NodeProps<JevNode>) => {
+  const { updateNodeData }=useReactFlow<WorkflowNode>();
+  const { results }=useRun();
+  const result=results.get(id);
+  const node: JevNode={ id,type: "jev",position: { x: 0,y: 0 },data };
+  const modelLabel=
+    JEV_MODELS.find((model) => model.id===data.model)?.label??data.model;
 
-  const setQuestions = useCallback(
-    (questions: QuestionDef[]) => updateNodeData(id, { questions }),
-    [id, updateNodeData]
+  const setQuestions=useCallback(
+    (questions: QuestionDef[]) => updateNodeData(id,{ questions }),
+    [id,updateNodeData]
   );
 
-  const addQuestion = (type: QuestionType) => {
-    const used = new Set(data.questions.map((question) => question.id));
-    let index = data.questions.length + 1;
+  const addQuestion=(type: QuestionType) => {
+    const used=new Set(data.questions.map((question) => question.id));
+    let index=data.questions.length+1;
 
-    while (used.has(`question_${index}`)) {
+    while(used.has(`question_${index}`)) {
       index++;
     }
 
-    setQuestions([...data.questions, createQuestion(type, index)]);
+    setQuestions([...data.questions,createQuestion(type,index)]);
   };
 
   return (
@@ -639,53 +642,79 @@ const JevNodeView = memo(({ id, data, selected }: NodeProps<JevNode>) => {
       hasTarget
       handles={getSourceHandles(node)}
       summary={
-        data.questions.length === 0 ? (
-          <p className="text-xs text-neutral-400">
-            No questions yet. Click Edit to add one.
+        <>
+          <p className="mb-1.5 text-xs font-medium text-neutral-700">
+            {modelLabel}{result?.mock? " · mock":""}
           </p>
-        ) : (
-          <ul className="flex flex-col gap-1.5">
-            {data.questions.map((question) => {
-              const answer = result?.answers?.[question.id];
+          {
+            data.questions.length===0? (
+              <p className="text-xs text-neutral-400">
+                No questions yet. Click Edit to add one.
+              </p>
+            ):(
+              <ul className="flex flex-col gap-1.5">
+                {data.questions.map((question) => {
+                  const answer=result?.answers?.[question.id];
 
-              return (
-                <li
-                  key={question.id}
-                  className="flex items-baseline justify-between gap-2 text-xs"
-                >
-                  <span className="truncate">
-                    <span className="font-mono text-neutral-700">
-                      {question.id}
-                    </span>{" "}
-                    <span className="text-neutral-400">
-                      {QUESTION_TYPE_LABELS[question.type].toLowerCase()}
-                    </span>
-                  </span>
-                  {answer ? (
-                    <span className="shrink-0 text-neutral-500">
-                      <AnswerBadge answer={answer} />
-                    </span>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        )
+                  return (
+                    <li
+                      key={question.id}
+                      className="flex items-baseline justify-between gap-2 text-xs"
+                    >
+                      <span className="truncate">
+                        <span className="font-mono text-neutral-700">
+                          {question.id}
+                        </span>{" "}
+                        <span className="text-neutral-400">
+                          {QUESTION_TYPE_LABELS[question.type].toLowerCase()}
+                        </span>
+                      </span>
+                      {answer? (
+                        <span className="shrink-0 text-neutral-500">
+                          <AnswerBadge answer={answer} />
+                        </span>
+                      ):null}
+                    </li>
+                  );
+                })}
+              </ul>
+            )
+          }
+        </>
       }
       editor={
         <div className="flex flex-col gap-2">
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Model</FieldLabel>
+            <Select
+              value={data.model}
+              onChange={(event) => updateNodeData(id,{ model: event.target.value })}
+            >
+              {!JEV_MODELS.some((model) => model.id===data.model)? (
+                <option value={data.model}>{data.model}</option>
+              ):null}
+              {JEV_MODELS.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </Select>
+          </label>
+          <p className="text-[11px] leading-relaxed text-neutral-500">
+            Uses OpenRouter credits. Latest can change versions automatically.
+          </p>
           <FieldLabel>Questions</FieldLabel>
-          {data.questions.map((question, index) => (
+          {data.questions.map((question,index) => (
             <QuestionEditor
               key={index}
               question={question}
               onChange={(next) =>
                 setQuestions(
-                  data.questions.map((entry, i) => (i === index ? next : entry))
+                  data.questions.map((entry,i) => (i===index? next:entry))
                 )
               }
               onRemove={() =>
-                setQuestions(data.questions.filter((_, i) => i !== index))
+                setQuestions(data.questions.filter((_,i) => i!==index))
               }
             />
           ))}

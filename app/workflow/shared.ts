@@ -15,8 +15,16 @@ export const OUT_HANDLE = "out";
 // Every Jev node has one "always" handle in addition to its answer handles.
 export const ANY_HANDLE = "any";
 
-// Text models verified against https://ai-gateway.vercel.sh/v1/models.
+// Text models verified against https://openrouter.ai/api/v1/models.
 export const LLM_MODEL_GROUPS = [
+  {
+    label: "Free",
+    models: [
+      { id: "qwen/qwen3.8-27b:free", label: "Qwen3.8 27B (free)" },
+      { id: "nvidia/nemotron-3.5-lightning:free", label: "Nemotron 3.5 Lightning (free)" },
+      { id: "liquid/lfm-2.5-2.6b:free", label: "LFM2.5 2.6B (free)" },
+    ],
+  },
   {
     label: "OpenAI",
     models: [
@@ -61,12 +69,18 @@ export const LLM_MODEL_GROUPS = [
     label: "Moonshot AI",
     models: [
       { id: "moonshotai/kimi-k3", label: "Kimi K3" },
-      { id: "moonshotai/kimi-k3-fast", label: "Kimi K3 Fast" },
     ],
   },
 ];
 export const LLM_MODELS = LLM_MODEL_GROUPS.flatMap((group) => group.models);
-export const DEFAULT_LLM_MODEL = "openai/gpt-5.4-nano";
+export const DEFAULT_LLM_MODEL = "liquid/lfm-2.5-2.6b:free";
+
+// Structured decision models published at https://openrouter.ai/typesafe.
+export const JEV_MODELS = [
+  { id: "typesafe/jev-1.13", label: "Jev 1.13" },
+  { id: "~typesafe/jev-latest", label: "Jev Latest (auto-updates)" },
+];
+export const DEFAULT_JEV_MODEL = "typesafe/jev-1.13";
 export const DEFAULT_NOUL_THRESHOLD = 0.7;
 
 export type QuestionType = "choice" | "score" | "noul";
@@ -123,6 +137,7 @@ export type ActivationMode = "any" | "all";
 
 export type JevNodeData = {
   label: string;
+  model: string;
   questions: QuestionDef[];
   activation?: ActivationMode;
 };
@@ -327,6 +342,7 @@ export function createJevNode(args: {
   id?: string;
   position: Point;
   label?: string;
+  model?: string;
   questions?: QuestionDef[];
   activation?: ActivationMode;
   selected?: boolean;
@@ -338,6 +354,7 @@ export function createJevNode(args: {
     selected: args.selected,
     data: {
       label: args.label ?? "Jev",
+      model: args.model ?? DEFAULT_JEV_MODEL,
       questions: args.questions ?? [createQuestion("choice", 1)],
       activation: args.activation ?? "any",
     },

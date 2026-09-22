@@ -21,8 +21,16 @@ Liveblocks, password authentication, and shared Redis admission.
    `UPSTASH_REDIS_REST_URL` (HTTPS) and `UPSTASH_REDIS_REST_TOKEN`.
    Redis is required for sign-in and every run, including mock AI runs. There is
    no unrestricted in-memory fallback when Redis is unavailable.
-7. Optionally set `TYPESAFE_API_KEY` and `AI_GATEWAY_API_KEY` to use real
-   providers. Without these keys, nodes use explicitly labeled mock responses.
+7. Optionally set `OPENROUTER_API_KEY` for both Jev and LLM nodes. Create it at
+   [OpenRouter API keys](https://openrouter.ai/settings/keys) and ensure the
+   account/key can pay for the selected model. No separate TypeSafe or Vercel
+   AI Gateway key is required.
+   Each Jev node has a **Model** menu: **Jev 1.13** is the default pinned version;
+   **Jev Latest** automatically follows new releases. Jev uses OpenRouter's
+   native `/api/alpha/decisions` endpoint for choice, score, and noul questions,
+   not chat completions. Jev consumes credits even when the downstream LLM is free.
+   Without the OpenRouter key, both node types use explicitly labeled mocks.
+   A configured provider's failure is reported as an error, never a mock success.
 8. Run `npm run dev`, sign in with your owner password, and create a workflow.
 
 The owner accesses **one private workspace** from any signed-in device.
@@ -43,6 +51,18 @@ Sign-in accepts at most **10 attempts per minute per deployment origin**, shared
 across all instances and including successful attempts. This deliberately does
 not trust client-supplied IP headers. Someone repeatedly attempting sign-in can
 temporarily block the owner's login; existing sessions remain usable.
+
+The LLM menu contains 21 text models verified against the OpenRouter catalog,
+including a **Free** group with Qwen3.8 27B, Nemotron 3.5 Lightning, and
+LFM2.5 2.6B. New LLM nodes default to `liquid/lfm-2.5-2.6b:free`.
+Existing nodes keep their saved model: select a model from **Free** explicitly
+if an existing workflow uses a paid model. Free models still require an
+OpenRouter API key and have provider rate limits and availability constraints;
+failures are reported without automatically switching to a paid model.
+
+Model IDs are stored in workflows. If an existing workflow selected
+`moonshotai/kimi-k3-fast`, choose another model in the editor: that ID is not
+available on OpenRouter. It is not silently remapped.
 
 ### Server-to-server runs
 
@@ -149,3 +169,13 @@ docker stop jev-security-redis
 the suite against production Redis. No real AI or Liveblocks credentials are
 needed for the regression suites; live cloud/provider verification requires
 deployment credentials.
+
+### Deferred feature: Provider selection
+
+- Add a Provider selector alongside Model; implementation is deferred.
+- Before implementation, clarify whether Provider means the model company
+  (filter models while retaining OpenRouter), the API connection (OpenRouter
+  versus a direct provider with separate credentials/billing), or the model's
+  hosting provider within OpenRouter.
+- No selection behavior has been decided. Keep the current OpenRouter integration
+  unchanged until this scope is confirmed.

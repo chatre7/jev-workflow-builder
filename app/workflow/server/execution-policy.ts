@@ -1,5 +1,5 @@
 import { MAX_NODE_EXECUTIONS, RUN_TIMEOUT_MS } from "../runs";
-import { LLM_MODELS, renderTemplate, type AnswerValue } from "../shared";
+import { JEV_MODELS, LLM_MODELS, renderTemplate, type AnswerValue } from "../shared";
 
 // Text limits count UTF-16 code units, including JSON escaping for trace limits.
 export const MAX_INPUT_CHARS = 20_000;
@@ -48,6 +48,12 @@ export function checkLimit(size: number, max: number, subject: string): void {
 export function assertAllowedModel(model: string): void {
   if (!LLM_MODELS.some((entry) => entry.id === model)) {
     throw new ExecutionError("Select a supported LLM model from the editor's model menu.");
+  }
+}
+
+export function assertAllowedJevModel(model: string): void {
+  if (!JEV_MODELS.some((entry) => entry.id === model)) {
+    throw new ExecutionError("Select a supported Jev model from the editor's model menu.");
   }
 }
 

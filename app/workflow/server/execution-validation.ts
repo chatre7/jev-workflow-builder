@@ -23,6 +23,7 @@ import {
   MAX_NODE_FAN_IN,
   MAX_OUTPUT_PROPERTIES,
   MAX_QUESTIONS,
+  assertAllowedJevModel,
   assertAllowedModel,
   checkLimit,
   jsonSize,
@@ -141,6 +142,8 @@ export function validateWorkflowGraph(value: unknown): {
         break;
       }
       case "jev":
+        text(node.data.model, MAX_IDENTIFIER_CHARS);
+        assertAllowedJevModel(node.data.model);
         validateQuestions(node.data.questions);
         break;
       case "llm":

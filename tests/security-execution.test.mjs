@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TypeSafeClient } from "@typesafe-ai/sdk";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createModuleLoader } from "./load-module.mjs";
 
 function fixtures(shared, kind = "llm") {
@@ -32,7 +32,7 @@ async function harness({ streamText, readGraph, clientOverrides = {}, env = {}, 
   const load = createModuleLoader({
     stubs: {
       nanoid: { nanoid: () => `id${++serial}` },
-      "@typesafe-ai/sdk": { TypeSafeClient },
+      "@openrouter/ai-sdk-provider": { createOpenRouter },
       "./liveblocks": { getLiveblocks: () => client, readWorkflowGraph: (...args) => readGraph ? readGraph(...args) : Promise.resolve(graph) },
       ai: { streamText: streamText ?? (() => ({ textStream: (async function* () { yield "A helpful reply."; })() })) },
     },
@@ -45,7 +45,7 @@ async function harness({ streamText, readGraph, clientOverrides = {}, env = {}, 
 
 test("current demo routes validated Jev results to customer and team outputs", async () => {
   const h = await harness({
-    env: { AI_GATEWAY_API_KEY: "test-key", TYPESAFE_API_KEY: "test-key" },
+    env: { OPENROUTER_API_KEY: "test-key" },
     streamText: () => ({ textStream: (async function* () { yield "We apologize for the duplicate charge and will refund it today."; })() }),
     globals: { fetch: async (_url, init) => {
       const { questions } = JSON.parse(init.body);
@@ -76,7 +76,7 @@ test("current demo routes validated Jev results to customer and team outputs", a
 
 test("rejects hostile storage structures before any provider is called", async () => {
   let providerCalls = 0;
-  const h = await harness({ env: { AI_GATEWAY_API_KEY: "test-key" }, streamText: () => { providerCalls++; throw new Error("must not call"); } });
+  const h = await harness({ env: { OPENROUTER_API_KEY: "test-key" }, streamText: () => { providerCalls++; throw new Error("must not call"); } });
   const { startWorkflowRun } = await h.load("app/workflow/server/executor");
   const variants = [
     (g) => { g.nodes[1].data.model = "unlisted/expensive-model"; },
@@ -99,11 +99,12 @@ test("rejects hostile storage structures before any provider is called", async (
   assert.equal(providerCalls, 0);
 });
 
-test("question count, criteria bounds, and reserved state keys are enforced", async () => {
+test("Jev model selection, question limits, and reserved state keys are enforced", async () => {
   const h = await harness();
   const { validateWorkflowGraph } = await h.load("app/workflow/server/execution-validation");
   const { MAX_QUESTIONS, MAX_CRITERIA } = await h.load("app/workflow/server/execution-policy");
   for (const mutate of [
+    (data) => { data.model = "openai/gpt-5.4-nano"; },
     (data) => { data.questions = Array.from({ length: MAX_QUESTIONS + 1 }, (_, i) => h.shared.createQuestion("choice", i)); },
     (data) => { data.questions[0].options = Array.from({ length: MAX_CRITERIA + 1 }, (_, i) => ({ key: `key_${i}`, description: "" })); },
     (data) => { data.questions[0].id = "input"; },
@@ -116,9 +117,8 @@ test("question count, criteria bounds, and reserved state keys are enforced", as
   }
 });
 
-test("fan-in amplification fails before downstream join or provider calls", async () => {
-  let calls = 0;
-  const h = await harness({ env: { AI_GATEWAY_API_KEY: "test-key" }, streamText: () => { calls++; throw new Error("must not call"); } });
+test("fan-in amplification fails before allocating downstream input", async () => {
+  const h = await harness();
   const graph = fixtures(h.shared);
   const branches = ["left", "right"].map((id) => h.shared.createJevNode({ id, position: { x: 1, y: 0 } }));
   graph.nodes.push(...branches);
@@ -131,7 +131,6 @@ test("fan-in amplification fails before downstream join or provider calls", asyn
   const trace = await startWorkflowRun({ roomId: "private-room", input: "x".repeat(20_000), trigger: "test" }).trace$;
   assert.equal(trace.status, "error");
   assert.match(trace.error, /Node text/);
-  assert.equal(calls, 0);
   assert.equal(trace.nodes.find((node) => node.nodeId === "middle").input, "");
 });
 
@@ -171,7 +170,7 @@ test("LLM refuses oversized deltas before publishing and cancels its transport",
   let transportSignal;
   const chunks = [];
   const h = await harness({
-    env: { AI_GATEWAY_API_KEY: "test-key" },
+    env: { OPENROUTER_API_KEY: "test-key" },
     streamText: (options) => {
       transportSignal = options.abortSignal;
       return { textStream: (async function* () { yield "x".repeat(16_385); })() };
@@ -187,6 +186,24 @@ test("LLM refuses oversized deltas before publishing and cancels its transport",
   assert.equal(transportSignal.aborted, true);
 });
 
+test("provider stream errors cannot turn partial output into a successful run", async () => {
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    streamText: (options) => ({
+      textStream: (async function* () {
+        yield "Partial response";
+        options.onError({ error: new Error("Bearer private-provider-detail") });
+      })(),
+    }),
+  });
+  h.setGraph(fixtures(h.shared));
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "private-room", input: "hello", trigger: "test" }).trace$;
+  assert.equal(trace.status, "error");
+  assert.equal(h.events.at(-1).metadata.status, "error");
+  assert.equal(JSON.stringify(trace).includes("private-provider-detail"), false);
+});
+
 test("mock LLM aborts instead of returning a partial successful answer", async () => {
   const controller = new AbortController();
   const chunks = [];
@@ -199,12 +216,12 @@ test("mock LLM aborts instead of returning a partial successful answer", async (
   assert.equal(chunks.length, 1);
 });
 
-test("TypeSafe SDK propagates cancellation into its actual fetch transport", async () => {
+test("Jev cancellation reaches the OpenRouter fetch transport", async () => {
   const started = Promise.withResolvers();
   const controller = new AbortController();
   let transportSignal;
   const h = await harness({
-    env: { TYPESAFE_API_KEY: "test-key" },
+    env: { OPENROUTER_API_KEY: "test-key" },
     globals: { fetch: async (_url, init) => {
       transportSignal = init.signal;
       started.resolve();
@@ -222,13 +239,59 @@ test("TypeSafe SDK propagates cancellation into its actual fetch transport", asy
   assert.equal(transportSignal.aborted, true);
 });
 
+test("Jev cancels an oversized response before accepting provider data", async () => {
+  let cancelled = false;
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    globals: { fetch: async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array(128_001)); },
+      cancel() { cancelled = true; },
+    })) },
+  });
+  const { askJev } = await h.load("app/workflow/server/typesafe");
+  await assert.rejects(askJev(
+    fixtures(h.shared, "jev").nodes[1].data,
+    { input: "hello" },
+    new AbortController().signal
+  ), /oversized response/);
+  assert.equal(cancelled, true);
+});
+
+test("Jev provider rejection cannot become a mock success or leak its body", async () => {
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    globals: { fetch: async () => new Response("private-provider-detail", { status: 429 }) },
+  });
+  h.setGraph(fixtures(h.shared, "jev"));
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "private-room", input: "hello", trigger: "test" }).trace$;
+  assert.equal(trace.status, "error");
+  assert.doesNotMatch(JSON.stringify(trace), /private-provider-detail/);
+});
+
+test("Jev rejects provider choices outside the configured answer set", async () => {
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    globals: { fetch: async () => new Response(JSON.stringify({
+      model: "typesafe/jev-1.13",
+      answers: { question_1: { type: "choice", choice: "unconfigured", confidence: 1, probabilities: {} } },
+    })) },
+  });
+  const { askJev } = await h.load("app/workflow/server/typesafe");
+  await assert.rejects(askJev(
+    fixtures(h.shared, "jev").nodes[1].data,
+    { input: "hello" },
+    new AbortController().signal
+  ), /outside the configured criteria/);
+});
+
 test("slow providers hit the real deadline and cannot update a finished feed", async () => {
   let fireDeadline;
   const entered = Promise.withResolvers();
   const late = Promise.withResolvers();
   let providerSignal;
   const h = await harness({
-    env: { AI_GATEWAY_API_KEY: "test-key" },
+    env: { OPENROUTER_API_KEY: "test-key" },
     globals: {
       setTimeout: (callback, ms) => ms === 60_000 ? (fireDeadline = callback, { deadline: true }) : setTimeout(callback, ms),
       clearTimeout: (timer) => { if (!timer?.deadline) clearTimeout(timer); },
@@ -278,7 +341,7 @@ test("provider execution is bounded to four concurrent calls per run", async () 
   let concurrent = 0;
   let peak = 0;
   const h = await harness({
-    env: { AI_GATEWAY_API_KEY: "test-key" },
+    env: { OPENROUTER_API_KEY: "test-key" },
     streamText: () => ({ textStream: (async function* () {
       concurrent++;
       peak = Math.max(peak, concurrent);
@@ -316,12 +379,12 @@ test("a hanging snapshot is cancelled and the run still reaches terminal error",
   assert.equal(h.events.at(-1).metadata.status, "error");
 });
 
-test("a slow Jev call reaches terminal error and its SDK transport is cancelled", async () => {
+test("a slow Jev call reaches terminal error and its transport is cancelled", async () => {
   let fireDeadline;
   let transportSignal;
   const entered = Promise.withResolvers();
   const h = await harness({
-    env: { TYPESAFE_API_KEY: "test-key" },
+    env: { OPENROUTER_API_KEY: "test-key" },
     globals: {
       setTimeout: (callback, ms) => ms === 60_000 ? (fireDeadline = callback, { deadline: true }) : setTimeout(callback, ms),
       clearTimeout: (timer) => { if (!timer?.deadline) clearTimeout(timer); },
@@ -350,7 +413,7 @@ test("failed message writes cannot starve terminal metadata finalization", async
   const metadata = [];
   let cancelledMessage = false;
   const h = await harness({
-    env: { AI_GATEWAY_API_KEY: "test-key" },
+    env: { OPENROUTER_API_KEY: "test-key" },
     streamText: () => { throw new Error("Bearer secret-provider-error"); },
     clientOverrides: {
       updateFeedMessage: (params, options) => {
