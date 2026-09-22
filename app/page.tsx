@@ -44,15 +44,14 @@ export default async function Page() {
           ) : (
             <>
               <p className="mt-4 text-base leading-relaxed text-neutral-600">
-                Sign in with an approved GitHub account to create workflows and
-                collaborate with your workspace. Only explicitly allowed members
-                can access this deployment.
+                Enter your owner password to manage your private workflows.
+                No GitHub account or OAuth setup is needed.
               </p>
               <Link
                 href="/api/auth/signin?callbackUrl=%2F"
                 className="primary-button mt-6 inline-flex"
               >
-                Sign in with GitHub
+                Sign in
               </Link>
             </>
           )}

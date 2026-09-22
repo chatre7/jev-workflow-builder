@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
     }
     const principal = await getPrincipal();
     if (!principal) {
-      throw new ApiError(401, "Sign in with an authorized GitHub account.");
+      throw new ApiError(401, "Sign in with the owner password.");
     }
     assertSameOrigin(request);
     const { room } = await readJsonObject(request, 4096);

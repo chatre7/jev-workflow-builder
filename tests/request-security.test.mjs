@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { createModuleLoader } from "./load-module.mjs";
 
 const token = "a-local-regression-token-with-at-least-32-characters";
-const member = { id: "github:123", name: "Member", avatar: "", color: "#7654cb" };
+const member = { id: "owner", name: "Owner", avatar: "", color: "#7654cb" };
 
 async function setup(principal = null) {
   const load = createModuleLoader({

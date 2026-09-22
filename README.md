@@ -2,41 +2,47 @@ https://github.com/user-attachments/assets/7564c3be-77e2-4283-a5ad-88ff973a269b
 
 ## Jev workflow builder
 
-A private, collaborative Jev/LLM workflow builder using Next.js, React Flow,
-Liveblocks, GitHub authentication, and shared Redis run admission.
+A private, single-owner Jev/LLM workflow builder using Next.js, React Flow,
+Liveblocks, password authentication, and shared Redis admission.
 
 ### Set up
 
 1. Use Node.js **22 or newer** and run `npm ci`.
 2. Copy `.env.example` to `.env.local`. Never commit real credentials.
-3. Create a GitHub OAuth App. Set its homepage to your deployment origin and its
-   callback to `<NEXTAUTH_URL>/api/auth/callback/github`.
-4. Set `GITHUB_ID`, `GITHUB_SECRET`, and `GITHUB_ALLOWED_USERS` (comma-separated
-   GitHub logins). Only these accounts may sign in.
-5. Set `NEXTAUTH_URL` to the exact origin, such as `http://localhost:3000` locally.
+3. Set `OWNER_PASSWORD` to a unique, randomly generated password (16–256
+   characters). No GitHub account or OAuth App is required.
+4. Set `NEXTAUTH_URL` to the exact origin, such as `http://localhost:3000` locally.
    HTTPS is required outside localhost. Generate a separate random
    `NEXTAUTH_SECRET` of at least 32 characters, for example:
    `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`.
-6. Set `LIVEBLOCKS_SECRET_KEY` from the
+5. Set `LIVEBLOCKS_SECRET_KEY` from the
    [Liveblocks dashboard](https://liveblocks.io/dashboard/apikeys).
-7. Create an [Upstash Redis](https://upstash.com/) database and set its
+6. Create an [Upstash Redis](https://upstash.com/) database and set its
    `UPSTASH_REDIS_REST_URL` (HTTPS) and `UPSTASH_REDIS_REST_TOKEN`.
-   Redis is required for every run, including mock AI runs. There is no
-   unrestricted in-memory fallback when Redis is unavailable.
-8. Optionally set `TYPESAFE_API_KEY` and `AI_GATEWAY_API_KEY` to use real
+   Redis is required for sign-in and every run, including mock AI runs. There is
+   no unrestricted in-memory fallback when Redis is unavailable.
+7. Optionally set `TYPESAFE_API_KEY` and `AI_GATEWAY_API_KEY` to use real
    providers. Without these keys, nodes use explicitly labeled mock responses.
-9. Run `npm run dev`, sign in, and create a workflow.
+8. Run `npm run dev`, sign in with your owner password, and create a workflow.
 
-All allowlisted accounts collaborate in **one shared private workspace**; this
-is not per-user private storage. `WORKFLOW_WORKSPACE_ID` selects that workspace
+The owner accesses **one private workspace** from any signed-in device.
+`WORKFLOW_WORKSPACE_ID` selects that workspace
 on the server (default `private`), never from a URL parameter. Keep its value
 stable, and use distinct values or separate Liveblocks projects for unrelated
 deployments. Cookie-authenticated mutations must originate from `NEXTAUTH_URL`.
 
 Missing authentication configuration locks private functionality rather than
 enabling anonymous access. Sign-out is available in the workspace header.
-Allowlist changes are checked on application requests; already-issued Liveblocks
-tokens/connections remain subject to Liveblocks' own expiration/revocation.
+Sessions last eight hours. Changing `OWNER_PASSWORD` and restarting/redeploying
+invalidates existing application sessions; old GitHub sessions are not accepted.
+Already-issued Liveblocks tokens/connections remain subject to Liveblocks' own
+expiration/revocation. Keep the owner password separate from `NEXTAUTH_SECRET`
+and `WORKFLOW_API_TOKEN`.
+
+Sign-in accepts at most **10 attempts per minute per deployment origin**, shared
+across all instances and including successful attempts. This deliberately does
+not trust client-supplied IP headers. Someone repeatedly attempting sign-in can
+temporarily block the owner's login; existing sessions remain usable.
 
 ### Server-to-server runs
 
@@ -140,6 +146,6 @@ docker stop jev-security-redis
 ```
 
 `TEST_REDIS_CONTAINER` may select another disposable test container. Do not run
-the suite against production Redis. No real AI or GitHub OAuth credentials are
-needed for the regression suites; live OAuth and provider verification require
+the suite against production Redis. No real AI or Liveblocks credentials are
+needed for the regression suites; live cloud/provider verification requires
 deployment credentials.

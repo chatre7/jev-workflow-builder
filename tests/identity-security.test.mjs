@@ -2,33 +2,61 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createModuleLoader } from "./load-module.mjs";
 
-const member = { id: "github:123", name: "member", avatar: "", color: "#7654cb" };
+const member = { id: "owner", name: "Owner", avatar: "", color: "#7654cb" };
 const configured = {
-  GITHUB_ID: "local-client", GITHUB_SECRET: "local-secret",
+  OWNER_PASSWORD: "local-owner-password-at-least-16-characters",
   NEXTAUTH_SECRET: "local-session-secret-at-least-32-characters",
-  NEXTAUTH_URL: "https://workflow.example", GITHUB_ALLOWED_USERS: "member",
+  NEXTAUTH_URL: "https://workflow.example",
+  UPSTASH_REDIS_REST_URL: "https://redis.example",
+  UPSTASH_REDIS_REST_TOKEN: "local-redis-token",
   LIVEBLOCKS_SECRET_KEY: "sk_localdev", WORKFLOW_WORKSPACE_ID: "team-a",
 };
 
-test("OAuth allowlist cannot be bypassed by another provider or a client session update", async () => {
+test("owner sign-in rejects wrong passwords, forged updates and obsolete sessions", async () => {
   const env = { ...configured };
-  let claims = { githubId: "123", githubLogin: "member" };
+  let claims = {};
   const load = createModuleLoader({ env, stubs: {
     "next-auth": { getServerSession: async options => options.callbacks.session({ session: {}, token: claims }) },
-    "next-auth/providers/github": { default: options => options },
+    "next-auth/providers/credentials": { default: options => options },
     "next/navigation": { redirect: () => { throw new Error("redirect"); } },
+    "@upstash/redis": { Redis: class { async eval() { return 1; } } },
   } });
   const auth = await load("app/workflow/server/auth.ts");
-  const callbacks = auth.getAuthOptions().callbacks;
-  assert.equal(await callbacks.signIn({ account: { provider: "github" }, profile: { login: "outsider" } }), false);
-  assert.equal(await callbacks.signIn({ account: { provider: "other" }, profile: { login: "member" } }), false);
-  const updated = await callbacks.jwt({ token: claims, trigger: "update", session: { githubId: "999", githubLogin: "admin" } });
-  claims = updated;
-  assert.equal((await auth.getPrincipal()).id, "github:123");
-  env.GITHUB_ALLOWED_USERS = "other-member";
+  const options = auth.getAuthOptions();
+  assert.equal(await options.providers[0].authorize({ password: "wrong-password" }), null);
+  claims = await options.callbacks.jwt({
+    token: {}, trigger: "update", session: { sub: "owner", ownerVersion: "forged" },
+  });
   assert.equal(await auth.getPrincipal(), null);
-  env.GITHUB_ALLOWED_USERS = "";
+  claims = { sub: "123", githubId: "123", githubLogin: "previous-owner" };
   assert.equal(await auth.getPrincipal(), null);
+  const user = await options.providers[0].authorize({ password: env.OWNER_PASSWORD });
+  assert.equal(user.id, "owner");
+  claims = await options.callbacks.jwt({ token: {}, account: { provider: "credentials" }, user });
+  assert.equal((await auth.getPrincipal()).id, "owner");
+  env.OWNER_PASSWORD = "a-different-long-owner-password";
+  assert.equal(await auth.getPrincipal(), null);
+  env.OWNER_PASSWORD = "";
+  assert.equal(await auth.getPrincipal(), null);
+});
+
+test("password guessing is throttled and Redis failure cannot allow sign-in", async () => {
+  let attempts = 0;
+  let unavailable = false;
+  const load = createModuleLoader({ env: { ...configured }, stubs: {
+    "next-auth": { getServerSession: async () => null },
+    "next-auth/providers/credentials": { default: options => options },
+    "next/navigation": { redirect: () => { throw new Error("redirect"); } },
+    "@upstash/redis": { Redis: class {
+      async eval() { if (unavailable) throw new Error("Redis offline"); return ++attempts; }
+    } },
+  } });
+  const auth = await load("app/workflow/server/auth.ts");
+  const authorize = auth.getAuthOptions().providers[0].authorize;
+  for (let i = 0; i < 10; i++) assert.equal(await authorize({ password: "incorrect" }), null);
+  await assert.rejects(authorize({ password: configured.OWNER_PASSWORD }));
+  unavailable = true;
+  await assert.rejects(authorize({ password: configured.OWNER_PASSWORD }));
 });
 
 test("private storage rejects public, legacy, wrong-workspace and mismatched-ID rooms", async () => {
@@ -88,7 +116,7 @@ test("room-token endpoint rejects anonymous and cross-workspace access before au
   const route = await load("app/api/liveblocks-auth/route.ts");
   const request = target => new Request("https://workflow.example/api/liveblocks-auth", {
     method: "POST", headers: { "content-type": "application/json", origin: "https://workflow.example" },
-    body: JSON.stringify({ room: target, userId: "github:123" }),
+    body: JSON.stringify({ room: target, userId: "forged-owner" }),
   });
   assert.equal((await route.POST(request(room))).status, 401);
   principal = member;

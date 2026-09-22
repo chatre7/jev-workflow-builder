@@ -46,7 +46,7 @@ export async function authenticateRunRequest(request: Request): Promise<Principa
   }
 
   const principal = await getPrincipal();
-  if (!principal) throw new ApiError(401, "Sign in with an authorized GitHub account.");
+  if (!principal) throw new ApiError(401, "Sign in with the owner password.");
   assertSameOrigin(request);
   return principal;
 }

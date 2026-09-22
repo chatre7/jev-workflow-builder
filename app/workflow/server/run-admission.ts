@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
-import { Redis } from "@upstash/redis";
+import { getRedis, getRedisConfigurationError } from "./redis";
 import { getWorkspaceId } from "./liveblocks";
 import { MAX_RUN_LLM_OUTPUT_TOKENS } from "./execution-policy";
 import { ApiError } from "./request-security";
@@ -56,27 +56,12 @@ for i = 1, #KEYS do redis.call('ZREM', KEYS[i], ARGV[1]) end
 return 1
 `;
 
-let redis: Redis | undefined;
-
 export type RunLease = { release: () => Promise<void> };
 
 export async function acquireRunLease(userId: string, roomId: string): Promise<RunLease> {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) throw new ApiError(503, "Run admission is not configured. Set the Redis credentials.");
-  if (!redis) {
-    let endpoint: URL;
-    try {
-      endpoint = new URL(url);
-    } catch {
-      throw new ApiError(503, "Run admission is not configured correctly.");
-    }
-    if (endpoint.protocol !== "https:") throw new ApiError(503, "Redis must use HTTPS.");
-    redis = new Redis({
-      url, token, retry: false, enableTelemetry: false, enableAutoPipelining: false,
-      signal: () => AbortSignal.timeout(5_000),
-    });
-  }
+  const configurationError = getRedisConfigurationError();
+  if (configurationError) throw new ApiError(503, configurationError);
+  const redis = getRedis();
 
   const workspace = createHash("sha256").update(getWorkspaceId()).digest("hex").slice(0, 24);
   const user = createHash("sha256").update(userId).digest("hex");
@@ -122,7 +107,7 @@ export async function acquireRunLease(userId: string, roomId: string): Promise<R
       if (released) return;
       released = true;
       try {
-        await redis!.eval(RELEASE_RUN_SCRIPT, keys.slice(0, 3), [leaseId]);
+        await redis.eval(RELEASE_RUN_SCRIPT, keys.slice(0, 3), [leaseId]);
       } catch {
         // Preserve the reservation until TTL rather than risk early admission.
         console.error("Run lease release failed; it will expire automatically.");

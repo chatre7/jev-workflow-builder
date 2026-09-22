@@ -1,8 +1,10 @@
 import "server-only";
 
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { getServerSession, type NextAuthOptions } from "next-auth";
-import GitHubProvider, { type GithubProfile } from "next-auth/providers/github";
+import CredentialsProvider from "next-auth/providers/credentials";
 import { redirect } from "next/navigation";
+import { getRedis, getRedisConfigurationError } from "./redis";
 
 export type Principal = {
   id: string;
@@ -17,57 +19,27 @@ declare module "next-auth" {
   }
 }
 
-const GITHUB_LOGIN = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
-const USER_COLORS = ["#7654cb", "#b13e53", "#257b68", "#286bb0"];
+const OWNER: Principal = { id: "owner", name: "Owner", avatar: "", color: "#7654cb" };
 
-function allowedLogins(): string[] {
-  return (process.env.GITHUB_ALLOWED_USERS ?? "")
-    .split(",")
-    .map((login) => login.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-function isAllowedLogin(login: unknown): login is string {
-  return (
-    typeof login === "string" &&
-    GITHUB_LOGIN.test(login) &&
-    allowedLogins().includes(login.toLowerCase())
-  );
-}
-
-function isAllowedGitHubProfile(
-  profile: unknown
-): profile is Pick<GithubProfile, "id" | "login"> {
-  return (
-    typeof profile === "object" &&
-    profile !== null &&
-    "id" in profile &&
-    typeof profile.id === "number" &&
-    Number.isSafeInteger(profile.id) &&
-    profile.id > 0 &&
-    "login" in profile &&
-    isAllowedLogin(profile.login)
-  );
-}
+// One shared attempt budget across instances. Do not trust caller-supplied IPs.
+const LOGIN_ATTEMPT_SCRIPT = `
+local attempts = redis.call('INCR', KEYS[1])
+if attempts == 1 then redis.call('EXPIRE', KEYS[1], 60) end
+return attempts
+`;
 
 export function getAuthConfigurationError(): string | null {
-  const required = [
-    "GITHUB_ID",
-    "GITHUB_SECRET",
-    "NEXTAUTH_SECRET",
-    "NEXTAUTH_URL",
-    "GITHUB_ALLOWED_USERS",
-  ] as const;
+  const required = ["OWNER_PASSWORD", "NEXTAUTH_SECRET", "NEXTAUTH_URL"] as const;
   const missing = required.filter((key) => !process.env[key]?.trim());
   if (missing.length > 0) {
-    return `Set ${missing.join(", ")} to enable GitHub sign-in.`;
+    return `Set ${missing.join(", ")} to enable owner sign-in.`;
   }
   if ((process.env.NEXTAUTH_SECRET?.length ?? 0) < 32) {
     return "NEXTAUTH_SECRET must contain at least 32 characters.";
   }
-  const logins = allowedLogins();
-  if (logins.length === 0 || logins.some((login) => !GITHUB_LOGIN.test(login))) {
-    return "GITHUB_ALLOWED_USERS must be a comma-separated list of GitHub logins.";
+  const password = process.env.OWNER_PASSWORD!;
+  if (password.length < 16 || password.length > 256) {
+    return "OWNER_PASSWORD must contain between 16 and 256 characters.";
   }
   try {
     const url = new URL(process.env.NEXTAUTH_URL!);
@@ -90,7 +62,7 @@ export function getAuthConfigurationError(): string | null {
   } catch {
     return "NEXTAUTH_URL must be the absolute origin of this deployment.";
   }
-  return null;
+  return getRedisConfigurationError();
 }
 
 export function getAuthOptions(): NextAuthOptions {
@@ -98,49 +70,67 @@ export function getAuthOptions(): NextAuthOptions {
   if (configurationError) {
     throw new Error(configurationError);
   }
+  const password = process.env.OWNER_PASSWORD!;
+  // Password rotation invalidates application sessions without exposing a hash
+  // of the password in session responses. Old OAuth sessions cannot authenticate.
+  const ownerVersion = createHmac("sha256", process.env.NEXTAUTH_SECRET!)
+    .update(password).digest("hex");
 
   return {
     secret: process.env.NEXTAUTH_SECRET,
     session: { strategy: "jwt", maxAge: 8 * 60 * 60 },
     providers: [
-      GitHubProvider({
-        clientId: process.env.GITHUB_ID!,
-        clientSecret: process.env.GITHUB_SECRET!,
-        authorization: { params: { scope: "read:user" } },
+      CredentialsProvider({
+        name: "Owner password",
+        credentials: {
+          password: {
+            label: "Owner password",
+            type: "password",
+            autocomplete: "current-password",
+          },
+        },
+        async authorize(credentials) {
+          let attempts: number;
+          try {
+            const origin = new URL(process.env.NEXTAUTH_URL!).origin;
+            const scope = createHash("sha256").update(origin).digest("hex");
+            attempts = await getRedis().eval<[], number>(
+              LOGIN_ATTEMPT_SCRIPT, [`jev:owner-login:${scope}`], []
+            );
+          } catch {
+            throw new Error("Sign-in is temporarily unavailable. Check Redis and try again.");
+          }
+          if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10) {
+            throw new Error("Too many sign-in attempts. Try again in one minute.");
+          }
+          const supplied = credentials?.password;
+          if (typeof supplied !== "string" || supplied.length > 256) return null;
+          const expectedHash = createHash("sha256").update(password).digest();
+          const suppliedHash = createHash("sha256").update(supplied).digest();
+          return timingSafeEqual(expectedHash, suppliedHash) ? { ...OWNER } : null;
+        },
       }),
     ],
     callbacks: {
-      signIn({ account, profile }) {
-        return account?.provider === "github" && isAllowedGitHubProfile(profile);
-      },
-      jwt({ token, account, profile }) {
-        // Only the verified OAuth profile may establish identity. Client session
-        // updates are deliberately ignored.
-        if (account?.provider === "github") {
-          if (!isAllowedGitHubProfile(profile)) {
-            throw new Error("GitHub account is not authorized.");
-          }
-          token.githubId = String(profile.id);
-          token.githubLogin = profile.login.toLowerCase();
+      jwt({ token, account, user }) {
+        // Only successful credential verification establishes identity.
+        // Client session updates cannot set identity or refresh its version.
+        if (account?.provider === "credentials" && user?.id === OWNER.id) {
+          token.sub = OWNER.id;
+          token.ownerVersion = ownerVersion;
         }
         return token;
       },
       session({ session, token }) {
         session.principal = null;
         if (
-          typeof token.githubId === "string" &&
-          /^[1-9]\d*$/.test(token.githubId) &&
-          isAllowedLogin(token.githubLogin)
+          token.sub === OWNER.id &&
+          typeof token.ownerVersion === "string" &&
+          /^[a-f0-9]{64}$/.test(token.ownerVersion) &&
+          timingSafeEqual(Buffer.from(token.ownerVersion, "hex"), Buffer.from(ownerVersion, "hex"))
         ) {
-          const id = token.githubId;
-          session.principal = {
-            id: `github:${id}`,
-            name: token.githubLogin,
-            avatar: `https://avatars.githubusercontent.com/u/${id}?s=96`,
-            color: USER_COLORS[Number(id) % USER_COLORS.length],
-          };
+          session.principal = { ...OWNER };
         }
-        // The app exposes only the verified public GitHub identity, not email.
         delete session.user;
         return session;
       },
