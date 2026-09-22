@@ -178,6 +178,28 @@ export function validateWorkflowGraph(value: unknown): {
         }
         break;
       }
+      case "http":
+        identifier(node.data.connection);
+        text(node.data.path, MAX_FIELD_CHARS);
+        text(node.data.body, MAX_FIELD_CHARS);
+        if (node.data.method !== "GET" && node.data.method !== "POST") {
+          throw new ExecutionError("HTTP Request supports GET or POST.");
+        }
+        if (node.data.method === "GET" && node.data.body !== "") {
+          throw new ExecutionError("GET requests must not contain a body.");
+        }
+        break;
+      case "approval":
+        text(node.data.prompt, MAX_FIELD_CHARS);
+        if (!node.data.prompt.trim()) throw new ExecutionError("Human Approval requires review instructions.");
+        break;
+      case "knowledge":
+        text(node.data.query, MAX_FIELD_CHARS);
+        if (!node.data.query.trim()) throw new ExecutionError("Knowledge Search requires a query.");
+        if (typeof node.data.topK !== "number" || !Number.isInteger(node.data.topK) || node.data.topK < 1 || node.data.topK > 5) {
+          throw new ExecutionError("Knowledge Search returns between 1 and 5 matches.");
+        }
+        break;
       default:
         throw new ExecutionError("Workflow contains an unsupported node type.");
     }

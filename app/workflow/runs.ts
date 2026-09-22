@@ -19,9 +19,9 @@ export function getRunOutput(
     : (outputs ?? {});
 }
 
-export type RunStatus = "running" | "complete" | "error";
+export type RunStatus = "running" | "waiting" | "complete" | "error";
 export type RunTrigger = "test" | "api";
-export type NodeStatus = "running" | "complete" | "error" | "skipped";
+export type NodeStatus = "running" | "waiting" | "complete" | "error" | "skipped";
 
 export type ChoiceAnswer = {
   type: "choice";
@@ -47,6 +47,14 @@ export type NoulAnswer = {
 };
 
 export type Answer = ChoiceAnswer | ScoreAnswer | NoulAnswer;
+
+export type ApprovalDetails = {
+  prompt: string;
+  expiresAt: number;
+  decision?: "approved" | "rejected";
+  decidedAt?: number;
+  decidedBy?: string;
+};
 
 /**
  * The data stored in one feed message: the result of executing one node.
@@ -75,6 +83,8 @@ export type NodeResultData = {
   // Set when the node ran against a mock instead of a real provider.
   mock?: boolean;
   model?: string;
+  httpStatus?: number;
+  approval?: ApprovalDetails;
   durationMs?: number;
   error?: string;
   startedAt: number;

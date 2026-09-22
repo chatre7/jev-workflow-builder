@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { Redis } from "@upstash/redis";
 import { createModuleLoader } from "./load-module.mjs";
 
 function fixtures(shared, kind = "llm") {
@@ -40,7 +41,9 @@ async function harness({ streamText, readGraph, clientOverrides = {}, env = {}, 
     stubs: {
       nanoid: { nanoid: () => `id${++serial}` },
       "@openrouter/ai-sdk-provider": { createOpenRouter },
-      "./liveblocks": { getLiveblocks: () => client, readWorkflowGraph: (...args) => readGraph ? readGraph(...args) : Promise.resolve(graph) },
+      "@upstash/redis": { Redis },
+      "./auth": { getPrincipal: async () => null },
+      "./liveblocks": { getWorkspaceId: () => "private", getLiveblocks: () => client, readWorkflowGraph: (...args) => readGraph ? readGraph(...args) : Promise.resolve(graph) },
       ai: { streamText: streamText ?? (() => ({ textStream: (async function* () { yield "A helpful reply."; })() })) },
     },
     env,
@@ -626,4 +629,23 @@ test("Transform expansion cannot bypass output text limits", async () => {
   assert.equal(trace.status, "error");
   assert.equal(trace.nodes.find((node) => node.nodeId === "middle").status, "error");
   assert.equal(trace.nodes.some((node) => node.nodeId === "output" && node.status === "complete"), false);
+});
+
+test("connected node configuration fails validation before execution", async () => {
+  const h = await harness();
+  const { validateWorkflowGraph } = await h.load("app/workflow/server/execution-validation");
+  const variants = [
+    h.shared.createHttpNode({ id: "middle", position: { x: 1, y: 0 }, connection: "__proto__" }),
+    h.shared.createHttpNode({ id: "middle", position: { x: 1, y: 0 }, connection: "orders", method: "DELETE" }),
+    h.shared.createHttpNode({ id: "middle", position: { x: 1, y: 0 }, connection: "orders", method: "GET", body: "{}" }),
+    h.shared.createKnowledgeNode({ id: "middle", position: { x: 1, y: 0 }, topK: 6 }),
+    h.shared.createKnowledgeNode({ id: "middle", position: { x: 1, y: 0 }, query: " " }),
+    h.shared.createApprovalNode({ id: "middle", position: { x: 1, y: 0 }, prompt: "" }),
+  ];
+  for (const node of variants) {
+    const graph = fixtures(h.shared);
+    graph.nodes[1] = node;
+    graph.edges[1].sourceHandle = node.type === "approval" ? "approved" : "out";
+    assert.throws(() => validateWorkflowGraph(graph));
+  }
 });

@@ -152,10 +152,31 @@ export function jsonSize(value: unknown, max: number, subject: string): number {
   return size;
 }
 
+export type RunBudgetState = {
+  intermediate: number;
+  prompts: number;
+  feed: number;
+};
+
 export class RunBudget {
   private intermediate = 0;
   private prompts = 0;
   private feed = 0;
+
+  constructor(state?: RunBudgetState) {
+    if (state) {
+      checkLimit(state.intermediate, MAX_RUN_INTERMEDIATE_CHARS, "Run intermediate text");
+      checkLimit(state.prompts, MAX_RUN_PROMPT_CHARS, "Run prompts");
+      checkLimit(state.feed, MAX_RUN_FEED_CHARS, "Run feed writes");
+      this.intermediate = state.intermediate;
+      this.prompts = state.prompts;
+      this.feed = state.feed;
+    }
+  }
+
+  snapshot(): RunBudgetState {
+    return { intermediate: this.intermediate, prompts: this.prompts, feed: this.feed };
+  }
 
   text(size: number): void {
     checkLimit(size, MAX_NODE_TEXT_CHARS, "Node text");

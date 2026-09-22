@@ -1,5 +1,6 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
 import { nanoid } from "nanoid";
 import type { Liveblocks as LiveblocksClient } from "@liveblocks/node";
 import {
@@ -14,6 +15,9 @@ import {
 } from "../runs";
 import {
   ANY_HANDLE,
+  APPROVAL_TTL_MS,
+  APPROVED_HANDLE,
+  REJECTED_HANDLE,
   FALSE_HANDLE,
   OUT_HANDLE,
   TRUE_HANDLE,
@@ -57,12 +61,34 @@ import { evaluateCondition, transformData, type DataNodeContext } from "./data-n
 import { getLiveblocks, readWorkflowGraph } from "./liveblocks";
 import { runLlm } from "./llm";
 import { askJev, toTypeSafeQuestions, type JevState } from "./typesafe";
+import { runHttpRequest } from "./http";
+import { searchKnowledge } from "./knowledge";
+import {
+  finishApprovalRun,
+  saveApprovalCheckpoint,
+  type ApprovalCheckpoint,
+  type ClaimedApproval,
+  type PendingApproval,
+  type SavedNodeState,
+} from "./approvals";
 
 type NodeState = {
   output: string;
   answers: Record<string, AnswerValue>;
   firedHandles: Set<string>;
 };
+
+// Unlike an inactive branch (null), blocked ancestry must be reconsidered later.
+const BLOCKED = Symbol("unresolved approval");
+type NodeOutcome = NodeState | null | typeof BLOCKED;
+
+function restoreState(state: SavedNodeState): NodeState {
+  return { ...state, firedHandles: new Set(state.firedHandles) };
+}
+
+function saveState(state: NodeState): SavedNodeState {
+  return { ...state, firedHandles: [...state.firedHandles] };
+}
 
 export type RunWorkflowOptions = {
   roomId: string;
@@ -78,20 +104,37 @@ export function startWorkflowRun(options: RunWorkflowOptions): {
   return { runId, trace$: runWorkflow(runId, options) };
 }
 
-async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<RunTrace> {
+/** Only a server-owned, atomically claimed checkpoint may enter this path. */
+export function resumeWorkflowRun(claim: ClaimedApproval): { runId: string; trace$: Promise<RunTrace> } {
+  const { checkpoint } = claim;
+  return {
+    runId: checkpoint.runId,
+    trace$: runWorkflow(checkpoint.runId, {
+      roomId: checkpoint.roomId, input: checkpoint.input, trigger: checkpoint.trigger,
+    }, claim),
+  };
+}
+
+async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: ClaimedApproval): Promise<RunTrace> {
   const { roomId, input, trigger } = options;
-  const startedAt = Date.now();
+  const saved = claim?.checkpoint;
+  const startedAt = saved?.startedAt ?? Date.now();
+  const phaseToken = claim?.token ?? randomUUID();
   const runDeadline = deadline();
   const signal = runDeadline.signal;
-  const budget = new RunBudget();
+  let budget = new RunBudget();
   const messages = new Map<string, NodeResultData>();
   const messageSizes = new Map<string, number>();
   const messageIds = new Map<string, string>();
-  const results = new Map<string, Promise<NodeState | null>>();
+  const results = new Map<string, Promise<NodeOutcome>>();
+  const settled = new Map<string, NodeState | null>();
+  const pending = new Map<string, PendingApproval>();
   const providerTasks = new Set<Promise<unknown>>();
   let liveblocks: LiveblocksClient | undefined;
   let outputProperties: OutputProperty[] = [];
-  let executions = 0;
+  let executions = saved?.executions ?? 0;
+  let waiting = false;
+  let approvalStorageTouched = !!claim;
   let closed = false;
   let error: string | undefined;
   // Reserve metadata, the returned input, and terminal error overhead up front.
@@ -167,16 +210,62 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
   try {
     if (typeof input !== "string") throw new ExecutionError("Run input must be text.");
     checkLimit(input.length, MAX_INPUT_CHARS, "Run input");
+    if (saved) {
+      budget = new RunBudget(saved.budget);
+      checkLimit(executions, MAX_NODE_EXECUTIONS, "Node executions");
+      if (saved.version !== 1 || saved.roomId !== roomId || saved.runId !== runId ||
+          !Number.isSafeInteger(startedAt) || !Array.isArray(saved.states) ||
+          !Array.isArray(saved.messages) || !Array.isArray(saved.pending)) {
+        throw new ExecutionError("Approval checkpoint is invalid.");
+      }
+      for (const { nodeId, state } of saved.states) settled.set(nodeId, state && restoreState(state));
+      for (const item of saved.pending) pending.set(item.nodeId, item);
+      for (const message of saved.messages) {
+        const size = jsonSize(message, MAX_NODE_TRACE_CHARS, "Node trace");
+        traceSize += size;
+        messageSizes.set(message.nodeId, size);
+        messages.set(message.nodeId, message);
+        messageIds.set(message.nodeId, `${runId}-${message.nodeId}`);
+        if (message.nodeType === "output" && message.outputs) outputSize = jsonSize(message.outputs, MAX_NODE_TRACE_CHARS, "Run output");
+      }
+      traceSize += outputSize;
+    }
     traceSize += jsonSize(input, MAX_RUN_TRACE_CHARS, "Run input");
+    checkLimit(traceSize, MAX_RUN_TRACE_CHARS, "Run trace");
     liveblocks = getLiveblocks();
-    await feed((requestSignal) => liveblocks!.createFeed(
-      { roomId, feedId: runId, metadata }, { signal: requestSignal }
-    ));
-    const snapshot = await boundedOperation(
+    if (saved) {
+      await feed((requestSignal) => liveblocks!.updateFeed(
+        { roomId, feedId: runId, metadata }, { signal: requestSignal }
+      ));
+    } else {
+      await feed((requestSignal) => liveblocks!.createFeed(
+        { roomId, feedId: runId, metadata }, { signal: requestSignal }
+      ));
+    }
+    const snapshot = saved?.graph ?? await boundedOperation(
       (requestSignal) => readWorkflowGraph(roomId, requestSignal), STORAGE_TIMEOUT_MS, signal
     );
     active();
     const { nodes, edges } = validateWorkflowGraph(snapshot);
+    if (claim) {
+      const item = pending.get(claim.nodeId);
+      const previous = messages.get(claim.nodeId);
+      if (!item || !previous?.approval || previous.status !== "waiting" ||
+          !nodes.some((node) => node.id === claim.nodeId && node.type === "approval")) {
+        throw new ExecutionError("Approval checkpoint is invalid.");
+      }
+      if ([...pending.values()].some((entry) => entry.expiresAt <= claim.decidedAt)) {
+        throw new ExecutionError("An approval expired. Start a new run.");
+      }
+      const handle = claim.decision === "approved" ? APPROVED_HANDLE : REJECTED_HANDLE;
+      const state = { ...restoreState(item.state), firedHandles: new Set([handle]) };
+      await writeMessage({
+        ...previous, status: "complete", output: state.output, firedHandles: [handle],
+        approval: { ...previous.approval, decision: claim.decision, decidedAt: claim.decidedAt, decidedBy: claim.decidedBy },
+      });
+      settled.set(claim.nodeId, state);
+      pending.delete(claim.nodeId);
+    }
     const outputNode = nodes.find((node) => node.type === "output");
     if (!outputNode || outputNode.type !== "output") throw new ExecutionError("Workflow output is missing.");
     outputProperties = getOutputProperties(outputNode.data);
@@ -185,10 +274,12 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
     const activeEdges = edges.filter((edge) => reachable.has(edge.source) && reachable.has(edge.target));
     const order = topologicalOrder(activeNodes, activeEdges)!;
 
-    async function executeNode(node: WorkflowNode): Promise<NodeState | null> {
+    async function executeNode(node: WorkflowNode): Promise<NodeOutcome> {
       const nodeStartedAt = Date.now();
       let base: NodeResultData | undefined;
       try {
+        if (settled.has(node.id)) return settled.get(node.id)!;
+        if (pending.has(node.id)) return BLOCKED;
         active();
         if (node.type === "input") {
           budget.text(input.length);
@@ -204,7 +295,11 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
           edge, state: await results.get(edge.source),
         }))), signal);
         active();
-        const fired = parents.filter(({ edge, state }) => state?.firedHandles.has(edge.sourceHandle!));
+        // Wait for every possible parent, even for OR activation. A blocked path
+        // may later contribute input, so caching a partial join would lose data.
+        if (parents.some(({ state }) => state === BLOCKED)) return BLOCKED;
+        const fired = parents.filter((parent): parent is typeof parent & { state: NodeState } =>
+          typeof parent.state !== "symbol" && !!parent.state?.firedHandles.has(parent.edge.sourceHandle!));
         const requireAll = getActivation(node.data) === "all";
         if (fired.length === 0 || (requireAll && fired.length < incoming.length)) return null;
         if (++executions > MAX_NODE_EXECUTIONS) {
@@ -217,7 +312,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
           status: "running", parentNodeIds, activation: requireAll ? "all" : "any",
           input: "", startedAt: nodeStartedAt,
         };
-        const passthrough = node.type === "jev" || node.type === "condition";
+        const passthrough = node.type === "jev" || node.type === "condition" || node.type === "approval";
         const joinBaseSize = jsonSize({ ...base, ...(passthrough ? { output: "" } : {}) }, MAX_NODE_TRACE_CHARS, "Node trace");
         // Reserve both the input and pass-through output before a join or call.
         const nodeInput = boundedJoin(parentTexts, budget, (serializedSize) => {
@@ -230,6 +325,41 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
         for (const { state } of fired) Object.assign(answers, state!.answers);
         await writeMessage(base);
         active();
+        if (node.type === "approval") {
+          const [prompt] = boundedTemplates([node.data.prompt], { input: nodeInput, answers }, budget);
+          const expiresAt = Date.now() + APPROVAL_TTL_MS;
+          await writeMessage({
+            ...base, status: "waiting", output: nodeInput,
+            approval: { prompt, expiresAt }, durationMs: Date.now() - nodeStartedAt,
+          });
+          pending.set(node.id, { nodeId: node.id, expiresAt, state: {
+            output: nodeInput, answers, firedHandles: [],
+          } });
+          return BLOCKED;
+        }
+        if (node.type === "http" || node.type === "knowledge") {
+          let output: string;
+          let httpStatus: number | undefined;
+          if (node.type === "http") {
+            const [path, body] = boundedTemplates([node.data.path, node.data.body], { input: nodeInput, answers }, budget);
+            const result = await provider(() => runHttpRequest({
+              connection: node.data.connection, method: node.data.method, path, body, signal,
+            }));
+            output = result.text;
+            httpStatus = result.status;
+          } else {
+            const [query] = boundedTemplates([node.data.query], { input: nodeInput, answers }, budget);
+            output = await provider(() => searchKnowledge({ query, topK: node.data.topK, signal }));
+          }
+          active();
+          budget.text(output.length);
+          await writeMessage({
+            ...base, status: "complete", output, firedHandles: [OUT_HANDLE],
+            ...(httpStatus === undefined ? {} : { httpStatus }),
+            durationMs: Date.now() - nodeStartedAt,
+          });
+          return { output, answers, firedHandles: new Set([OUT_HANDLE]) };
+        }
         if (node.type === "jev") {
           const state: JevState = { input: nodeInput };
           for (const [id, answer] of Object.entries(answers)) state[id] = answer.value;
@@ -358,13 +488,28 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
     }
 
     for (const node of order) {
-      const task = executeNode(node);
+      const task = executeNode(node).then((state) => {
+        if (state !== BLOCKED) settled.set(node.id, state);
+        return state;
+      });
       // Observe immediately: a parent may fail before the aggregate is installed.
       void task.catch(() => {});
       results.set(node.id, task);
     }
     await abortable(Promise.all(results.values()), signal);
     active();
+    if (pending.size > 0) {
+      const checkpoint: ApprovalCheckpoint = {
+        version: 1, roomId, runId, input, trigger, startedAt, graph: { nodes, edges },
+        states: [...settled].map(([nodeId, state]) => ({ nodeId, state: state && saveState(state) })),
+        pending: [...pending.values()], messages: [...messages.values()],
+        budget: budget.snapshot(), executions,
+      };
+      approvalStorageTouched = true;
+      await boundedOperation(() => saveApprovalCheckpoint(checkpoint, phaseToken, !saved), STORAGE_TIMEOUT_MS, signal);
+      active();
+      waiting = true;
+    }
   } catch (failure) {
     error = publicExecutionError(failure);
   } finally {
@@ -374,16 +519,27 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
     await Promise.allSettled(results.values());
   }
 
+  if (approvalStorageTouched && (!waiting || error)) {
+    try {
+      await boundedOperation(() => finishApprovalRun(roomId, runId, phaseToken, error ? "error" : "complete"), STORAGE_TIMEOUT_MS);
+    } catch (failure) {
+      error ??= publicExecutionError(failure);
+    }
+  }
   const completedAt = Date.now();
   if (error) {
     for (const [id, message] of messages) {
-      if (message.status === "running") messages.set(id, {
+      if (message.status === "running" || message.status === "waiting") messages.set(id, {
         ...message, status: "error", error, durationMs: completedAt - message.startedAt,
       });
     }
   }
   const finalMetadata: Liveblocks["FeedMetadata"] = {
-    ...metadata, status: error ? "error" : "complete", completedAt: String(completedAt),
+    ...metadata, status: error ? "error" : waiting ? "waiting" : "complete",
+    ...(!waiting || error ? { completedAt: String(completedAt) } : {}),
+    // The phase token is published only after a confirmed checkpoint save.
+    // A timed-out SAVE cannot become claimable even if terminal cleanup fails.
+    ...(waiting && !error ? { approvalToken: phaseToken } : {}),
     ...(error ? { error } : {}),
   };
   if (liveblocks) {
@@ -417,9 +573,9 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions): Promise<
   }
   const outputMessage = [...messages.values()].find((message) => message.nodeType === "output" && message.status === "complete");
   return {
-    runId, status: error ? "error" : "complete", trigger,
+    runId, status: error ? "error" : waiting ? "waiting" : "complete", trigger,
     input: typeof input === "string" && input.length <= MAX_INPUT_CHARS ? input : "",
-    startedAt, completedAt, ...(error ? { error } : {}),
+    startedAt, ...(!waiting || error ? { completedAt } : {}), ...(error ? { error } : {}),
     output: outputMessage ? getRunOutput(outputMessage.outputs) : createEmptyOutput(outputProperties),
     nodes: [...messages.values()].sort((a, b) => a.startedAt - b.startedAt),
   };

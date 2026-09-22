@@ -27,6 +27,8 @@ export function getRedis(): Redis {
     retry: false,
     enableTelemetry: false,
     enableAutoPipelining: false,
+    // Keep checkpoint JSON as text until its byte limits have been checked.
+    automaticDeserialization: false,
     signal: () => AbortSignal.timeout(5_000),
   });
   return client;

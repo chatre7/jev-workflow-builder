@@ -31,7 +31,8 @@ Liveblocks, password authentication, and shared Redis admission.
    not chat completions. Jev consumes credits even when the downstream LLM is free.
    Without the OpenRouter key, both node types use explicitly labeled mocks.
    A configured provider's failure is reported as an error, never a mock success.
-8. Run `npm run dev`, sign in with your owner password, and create a workflow.
+8. Optionally configure the HTTP connections and document catalog described below.
+9. Run `npm run dev`, sign in with your owner password, and create a workflow.
 
 The owner accesses **one private workspace** from any signed-in device.
 `WORKFLOW_WORKSPACE_ID` selects that workspace
@@ -104,13 +105,109 @@ Transform and `false` to a customer-draft Transform. The review branch can retai
 `order_id`. This is deterministic routing, not authorization to transfer money.
 Existing graph, input, trace, and output-size limits also apply to these nodes.
 
+### HTTP Request
+
+Configure named connections in the server-only `WORKFLOW_HTTP_CONNECTIONS` JSON
+environment variable. A node stores only the alias, method, relative path template,
+and optional POST body template—not connection credentials.
+
+```dotenv
+WORKFLOW_HTTP_CONNECTIONS='{"support":{"baseUrl":"https://api.example.com/v1/","methods":["GET","POST"],"headers":{"Authorization":"Bearer YOUR_SERVER_SECRET"}}}'
+```
+
+Use aliases beginning with an ASCII letter, followed by letters, digits, `_`, or
+`-` (maximum 64 characters). `methods` defaults to `["GET"]`; `headers` is optional.
+Base paths gain a trailing slash. Requests must remain inside that HTTPS origin
+and base path. Redirects, traversal, encoded path separators, private/reserved
+addresses, and routing/proxy header overrides are rejected. DNS results are
+validated and pinned to the TLS connection, with hostname verification retained.
+
+Path and body templates support `{{input}}` and inherited `{{answers.<id>}}`
+values. Substitution inserts **raw text**, not URL encoding or JSON escaping.
+URL-encode query values before supplying them. To build a JSON body safely, use
+Transform to select typed fields, then set the POST body to `{{input}}`.
+Nonblank POST bodies must be valid JSON; GET has no body. The response is UTF-8
+text, with its HTTP status in the trace. Non-2xx responses fail without recording
+their body. Each request has a 15-second total deadline, no redirects or retries,
+a 4,096-byte URL limit, and 128 KiB / 32,000-character body and response limits.
+
+Trust the administrators of configured destinations: they receive the configured
+headers. Common credential reflections are rejected, but arbitrary upstream
+transformations cannot be recognized as secrets. Never put credentials in node
+paths, bodies, or input. A POST timeout does **not** prove that the remote action
+was not applied; check the upstream system before starting another run.
+
+### Human Approval
+
+An Approval node renders its review prompt, preserves its input, and pauses with
+status `waiting`. Review the prompt and input in **Runs**, then select **Approve**
+or **Reject**. Exactly one corresponding handle fires, passing the original input
+unchanged. Waiting runs cannot be deleted from the history; decide first, or
+select an expired run to delete it.
+
+The checkpoint stores the graph snapshot, completed outputs, pending approvals,
+trace, execution count, and cumulative budgets in Redis for up to **24 hours per
+approval**. Pausing releases the active run lease and hosting timer. A resume
+keeps the original run ID and uses the frozen graph even if the editor changed.
+Completed HTTP, AI, and search nodes are not executed again. Unresolved approval
+ancestry blocks downstream joins, including `any` joins; sequential and parallel
+approvals are supported. Expiry never approves a request.
+
+`POST /api/workflows/WORKFLOW_ID/runs/RUN_ID/approval` accepts only
+`{"nodeId":"APPROVAL_NODE_ID","decision":"approved"}` or `"rejected"`.
+It requires the owner cookie session and same-origin request. An `Authorization`
+header is refused—even with a valid owner cookie. The response is `202` with the
+same run ID; `?wait=true` returns the next phase's trace. Duplicate/busy decisions
+return `409`; expired/unavailable checkpoints return `410`. The server records
+the deciding owner and time.
+
+Claims atomically consume the resumable snapshot before execution. If a claimed
+resume is interrupted, it stays consumed and is **not automatically replayed**.
+Verify external side effects before starting a new run. A checkpoint-save failure
+fails closed; a phase token is published to the private feed only after Redis
+acknowledges the save. If feed publication fails, the durable checkpoint may be
+unavailable for approval rather than risking an unconfirmed resume. This is not
+an exactly-once transaction with external APIs.
+
+### Knowledge Search
+
+Set `WORKFLOW_KNOWLEDGE_FILE` to a server-chosen JSON file, for example
+`examples/knowledge.json`. Ship or mount that file with the deployment; workflows
+cannot choose arbitrary paths. The included English/Thai policies are explicitly
+**DEMO data**, not business policies for a production installation.
+
+```json
+[
+  {
+    "id": "refund-policy",
+    "title": "Refund approval policy",
+    "text": "Your actual approved policy text.",
+    "url": "https://support.example.com/refunds"
+  }
+]
+```
+
+This is deterministic **lexical BM25 search**, using Thai/English word
+segmentation—not AI, embeddings, or semantic search. Set a query template and
+`topK` from 1–5. Output is JSON text with `query`, `match_count`, and `matches`;
+each match contains its source `id`, `title`, optional HTTPS `url`, matched-region
+`excerpt`, and score. `match_count` is the number returned, not the catalog's total
+hits. The canvas and trace show actual citation IDs and excerpts. A valid query
+with no matching words returns an empty list; missing or invalid configuration
+fails instead of fabricating a no-hit result.
+
+Catalogs are limited to 1 MiB and 100 documents. Each document has a unique safe
+ASCII ID (96 characters), title (160), text (8,000), and optional credential-free
+HTTPS URL (2,048). Unknown fields are rejected. Excerpts are at most 600
+characters; resolved queries and outputs are bounded to 32,000 characters.
+
 ### Server-to-server runs
 
 Generate an independent random `WORKFLOW_API_TOKEN` (32–256 non-whitespace
 characters) on the workflow server and configure the same secret in the calling
 service. This optional credential authorizes **runs only**, across this
-deployment's private workspace. It cannot obtain collaboration tokens or edit
-workflows. Never include it in browser code or `NEXT_PUBLIC_*` variables.
+deployment's private workspace. It cannot approve requests, obtain collaboration
+tokens, or edit workflows. Never include it in browser code or `NEXT_PUBLIC_*` variables.
 
 ```sh
 curl -X POST "https://your-app.example/api/workflows/WORKFLOW_ID/runs?wait=true" \
@@ -119,10 +216,11 @@ curl -X POST "https://your-app.example/api/workflows/WORKFLOW_ID/runs?wait=true"
   -d '{"input":"Please review this support ticket."}'
 ```
 
-`?wait=true` returns a trace and named output arrays. Without it, the API returns
-`202` with a run ID and continues work through Next.js `after()`. The distributed
-run reservation stays held until execution settles. Requests without valid
-credentials receive `401`; same-origin violations receive `403`; quota failures
+`?wait=true` returns a trace and named output arrays, stopping at `waiting` when
+human review is needed. Without it, the API returns `202` with a run ID and
+continues work through Next.js `after()`. The distributed run reservation stays
+held until the active phase settles.
+Requests without valid credentials receive `401`; same-origin violations receive `403`; quota failures
 receive `429` with `Retry-After`; Redis unavailability receives `503`.
 
 ### Resource and spending controls
@@ -132,11 +230,11 @@ Policy constants live in `app/workflow/server/run-admission.ts`,
 
 | Scope | Limit |
 | --- | --- |
-| Simultaneous runs | 4/workspace, 2/principal, 1/workflow |
-| Starts per minute | 30/workspace, 6/principal |
-| Starts per UTC day | 200/workspace, 50/principal |
+| Simultaneous active phases | 4/workspace, 2/principal, 1/workflow |
+| Starts/resumes per minute | 30/workspace, 6/principal |
+| Starts/resumes per UTC day | 200/workspace, 50/principal |
 | Reserved LLM output tokens per UTC day | 5,120,000/workspace, 1,024,000/principal |
-| Output-token reservation per accepted run | 51,200 (25 executions × 2,048 tokens) |
+| Output-token reservation per accepted phase | 51,200 (25 executions × 2,048 tokens) |
 | Request body / input | 96 KiB JSON / 20,000 UTF-16 code units |
 | Graph / fan-in | 26 nodes, 64 edges, 8 incoming edges/node |
 | Executions / simultaneous provider calls | 25 non-input nodes / 4 per run |
@@ -146,13 +244,16 @@ Policy constants live in `app/workflow/server/run-admission.ts`,
 | Resolved prompts | 40,000/node, 120,000/run |
 | Retained trace | 160,000/node, 512,000/run serialized code units |
 | Cumulative feed message payloads | 2,000,000 serialized code units/run |
-| Deadline | 60 seconds plus at most 2 seconds of feed finalization |
+| Approval checkpoint | 512,000 serialized code units and 384 KiB UTF-8; 768 KiB storage request |
+| Deadline | 60 seconds/active phase; up to 5 seconds approval finalization and 2 seconds feed cleanup |
 
 Redis uses atomic admission across instances and expiring leases. Rate/day
 reservations are **not refunded**, even for rejected graphs or failed runs. The
 conservative token reservation makes the default effective daily ceiling at
-most 100 runs/workspace and 20/principal, even if each run uses fewer tokens.
-All automation calls share one principal.
+most 100 active phases/workspace and 20/principal, even for runs without AI.
+Each approval resume acquires a fresh phase reservation; logical execution and
+text/trace budgets remain cumulative across the whole run. All automation calls
+share one principal.
 
 These are request/token ceilings, **not a currency-denominated budget**. Provider
 model prices, input-token charges, and Jev billing differ; also configure spending
@@ -192,10 +293,11 @@ npm audit --package-lock-only
 
 Security regressions use Node's test runner and unchanged application modules
 with isolated external services. They cover authorization, workspace isolation,
-request bounds, graph amplification, provider cancellation, and deadlines.
+request bounds, graph amplification, provider cancellation, deadlines, HTTP SSRF
+and credential handling, lexical retrieval, and approval resume/replay boundaries.
 
-The separate Redis integration suite executes the actual Lua admission scripts
-against an ephemeral local Redis container:
+The separate Redis integration suite executes the actual Lua admission and
+approval claim/fencing scripts against an ephemeral local Redis container:
 
 ```sh
 docker run --rm --name jev-security-redis redis:7-alpine redis-server --save "" --appendonly no

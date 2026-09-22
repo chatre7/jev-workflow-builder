@@ -1,0 +1,22 @@
+[
+  {
+    "id": "demo-refund-policy-en",
+    "title": "DEMO ONLY — Refund approval policy",
+    "text": "This is an illustrative DEMO policy, not the user's actual business policy. Refunds above 1000 require supervisor approval before a refund is issued. Refunds of 1000 or less may be handled by support after verifying the payment and customer identity. A rejected supervisor decision must not issue a refund."
+  },
+  {
+    "id": "demo-refund-policy-th",
+    "title": "ข้อมูลสาธิต DEMO — นโยบายคืนเงิน",
+    "text": "ข้อมูลนี้เป็นนโยบายตัวอย่างสำหรับสาธิตเท่านั้น ไม่ใช่นโยบายจริงของผู้ใช้ การคืนเงินที่มียอดเกิน 1000 ต้องได้รับการอนุมัติจากหัวหน้างานก่อนดำเนินการคืนเงิน ยอดคืนเงิน 1000 หรือน้อยกว่านั้นให้ฝ่ายบริการตรวจสอบรายการชำระเงินและตัวตนลูกค้าก่อนดำเนินการ หากหัวหน้างานปฏิเสธ ห้ามดำเนินการคืนเงิน"
+  },
+  {
+    "id": "demo-delivery-policy-en",
+    "title": "DEMO ONLY — Delivery status policy",
+    "text": "This is an illustrative DEMO policy, not the user's actual business policy. For a delivery-status request, verify the order number and consult the carrier's current tracking record. Report the actual tracking status and timestamp, not an invented delivery date. If no tracking record exists or delivery is delayed, escalate to support and explain that the delivery date is not confirmed."
+  },
+  {
+    "id": "demo-delivery-policy-th",
+    "title": "ข้อมูลสาธิต DEMO — นโยบายติดตามการจัดส่ง",
+    "text": "ข้อมูลนี้เป็นนโยบายตัวอย่างสำหรับสาธิตเท่านั้น ไม่ใช่นโยบายจริงของผู้ใช้ เมื่อลูกค้าถามสถานะการจัดส่ง ให้ตรวจสอบหมายเลขคำสั่งซื้อและข้อมูลติดตามล่าสุดของผู้ขนส่ง แจ้งสถานะการจัดส่งและเวลาที่ตรวจสอบได้จริง ห้ามแต่งวันที่ส่งถึง หากไม่มีข้อมูลติดตามหรือการจัดส่งล่าช้า ให้ส่งเรื่องให้ฝ่ายบริการและแจ้งว่ายังยืนยันวันส่งถึงไม่ได้"
+  }
+]

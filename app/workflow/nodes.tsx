@@ -17,6 +17,10 @@ import {
   CircleDashed,
   FileOutput,
   GitBranch,
+  Globe,
+  BookOpen,
+  ClipboardCheck,
+  Clock3,
   Loader2,
   MessageSquareText,
   Pencil,
@@ -35,7 +39,7 @@ import {
   type ReactNode,
 } from "react";
 import { FieldLabel, Select, TextArea, TextField } from "./fields";
-import { useRun } from "./run-context";
+import { useApprovalExpired, useRun } from "./run-context";
 import {
   getRunOutput,
   type Answer,
@@ -63,6 +67,9 @@ import {
   truncate,
   type ActivationMode,
   type ConditionNode,
+  type HttpNode,
+  type ApprovalNode,
+  type KnowledgeNode,
   type ConditionOperator,
   type Criterion,
   type HandleDef,
@@ -95,6 +102,8 @@ function StatusIcon({ status }: { status: NodeStatus | undefined }) {
   switch (status) {
     case "running":
       return <Loader2 className="size-3.5 animate-spin text-violet-600" />;
+    case "waiting":
+      return <Clock3 className="size-3.5 text-amber-700" aria-label="Waiting for approval" />;
     case "complete":
       return <Check className="size-3.5 text-emerald-600" />;
     case "error":
@@ -1171,6 +1180,240 @@ const TransformNodeView = memo(
 );
 
 /* -------------------------------------------------------------------------- */
+/*                              Connected nodes                               */
+/* -------------------------------------------------------------------------- */
+
+const HttpNodeView = memo(({ id, data, selected }: NodeProps<HttpNode>) => {
+  const { updateNodeData } = useReactFlow<WorkflowNode>();
+  const { results } = useRun();
+  const result = results.get(id);
+  const node: HttpNode = { id, type: "http", position: { x: 0, y: 0 }, data };
+
+  return (
+    <NodeFrame
+      id={id}
+      node={node}
+      selected={selected}
+      icon={<Globe className="size-3.5" />}
+      accent="#0284c7"
+      result={result}
+      hasTarget
+      handles={getSourceHandles(node)}
+      summary={
+        <div className="flex flex-col gap-1.5">
+          <p className="break-words text-xs font-medium text-neutral-700">
+            {data.method} · {data.connection || "Choose a connection"}
+          </p>
+          <p className="break-all font-mono text-xs text-neutral-500">{truncate(data.path, 100)}</p>
+          {result?.httpStatus !== undefined ? (
+            <p className="text-xs font-medium text-neutral-700">HTTP {result.httpStatus}</p>
+          ) : null}
+          {result?.output !== undefined ? (
+            <p className="max-h-24 overflow-hidden whitespace-pre-wrap break-words text-xs text-neutral-700">
+              {truncate(result.output, 220) || "(empty response)"}
+            </p>
+          ) : null}
+        </div>
+      }
+      editor={
+        <>
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Connection alias</FieldLabel>
+            <TextField value={data.connection} placeholder="support-api" onCommit={(connection) => updateNodeData(id, { connection })} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Method</FieldLabel>
+            <Select value={data.method} onChange={(event) => updateNodeData(id, { method: event.target.value as "GET" | "POST", body: event.target.value === "GET" ? "" : data.body })}>
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+            </Select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Relative path template</FieldLabel>
+            <TextField value={data.path} placeholder="tickets?status=open" onCommit={(path) => updateNodeData(id, { path })} />
+          </label>
+          {data.method === "POST" ? (
+            <label className="flex flex-col gap-1">
+              <FieldLabel>JSON body template</FieldLabel>
+              <TextArea rows={4} value={data.body} placeholder="{{input}}" onCommit={(body) => updateNodeData(id, { body })} />
+            </label>
+          ) : null}
+          <p className="text-[11px] leading-relaxed text-neutral-500">
+            Use <code>{"{{input}}"}</code> and <code>{"{{answers.<id>}}"}</code> in the path and body.
+            POST bodies must be valid JSON after rendering; leave blank for no body.
+            Templates insert raw text. URL-encode query values; use a Transform node followed by{" "}
+            <code>{"{{input}}"}</code> to safely build JSON bodies.
+          </p>
+          <p className="break-words text-[11px] leading-relaxed text-neutral-500">
+            An administrator configures aliases, allowed methods and credentials in the server&apos;s{" "}
+            <code className="break-all">WORKFLOW_HTTP_CONNECTIONS</code>. Only the alias is stored here.
+            Never paste keys into paths or bodies. Requests stay within the configured HTTPS path scope.
+          </p>
+        </>
+      }
+    />
+  );
+});
+
+const ApprovalNodeView = memo(({ id, data, selected }: NodeProps<ApprovalNode>) => {
+  const { updateNodeData } = useReactFlow<WorkflowNode>();
+  const { results } = useRun();
+  const result = results.get(id);
+  const approval = result?.approval;
+  const expired = useApprovalExpired(approval?.decision ? undefined : approval?.expiresAt);
+  const node: ApprovalNode = { id, type: "approval", position: { x: 0, y: 0 }, data };
+
+  return (
+    <NodeFrame
+      id={id}
+      node={node}
+      selected={selected}
+      icon={<ClipboardCheck className="size-3.5" />}
+      accent="#d97706"
+      result={result}
+      hasTarget
+      handles={getSourceHandles(node)}
+      summary={
+        <div className="flex flex-col gap-1.5">
+          <p className="break-words text-xs leading-relaxed text-neutral-700">
+            {truncate(approval?.prompt ?? data.prompt, 180)}
+          </p>
+          {approval?.decision ? (
+            <p className="text-xs font-medium text-neutral-700">
+              {approval.decision === "approved" ? "Approved" : "Rejected"} · input passed through
+            </p>
+          ) : expired ? (
+            <p className="text-xs font-medium text-red-700">Approval expired · start a new run</p>
+          ) : result?.status === "waiting" ? (
+            <p className="text-xs font-medium text-amber-700">Waiting for review in the Runs panel</p>
+          ) : (
+            <p className="text-xs text-neutral-500">Human review · expires after 24 hours</p>
+          )}
+          {approval && !approval.decision ? (
+            <p className="text-[11px] text-neutral-500">Expires {new Date(approval.expiresAt).toLocaleString()}</p>
+          ) : null}
+        </div>
+      }
+      editor={
+        <>
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Review prompt template</FieldLabel>
+            <TextArea rows={4} value={data.prompt} placeholder="Review this request: {{input}}" onCommit={(prompt) => updateNodeData(id, { prompt })} />
+          </label>
+          <p className="text-[11px] leading-relaxed text-neutral-500">
+            Use <code>{"{{input}}"}</code> or <code>{"{{answers.<id>}}"}</code>.
+            The owner reviews the prompt and input in the Runs panel. The run pauses durably for up to
+            24 hours; expiry never approves it. Approved or rejected sends the original input down that branch.
+          </p>
+        </>
+      }
+    />
+  );
+});
+
+export function KnowledgeResultPreview({ output, compact = false }: { output: string; compact?: boolean }) {
+  let matches: { id: string; title: string; excerpt: string; url?: string }[];
+  try {
+    const parsed: unknown = JSON.parse(output);
+    if (!parsed || typeof parsed !== "object" || !("matches" in parsed) || !Array.isArray(parsed.matches)) {
+      throw new Error("Invalid search result");
+    }
+    matches = parsed.matches.slice(0, 5).map((match: unknown) => {
+      if (!match || typeof match !== "object" ||
+          !("id" in match) || typeof match.id !== "string" ||
+          !("title" in match) || typeof match.title !== "string" ||
+          !("excerpt" in match) || typeof match.excerpt !== "string") {
+        throw new Error("Invalid citation");
+      }
+      let url: string | undefined;
+      if ("url" in match && typeof match.url === "string") {
+        try {
+          const candidate = new URL(match.url);
+          if (candidate.protocol === "https:" && !candidate.username && !candidate.password) url = candidate.href;
+        } catch { /* An invalid citation URL is rendered as text only. */ }
+      }
+      return { id: match.id, title: match.title, excerpt: match.excerpt, url };
+    });
+  } catch {
+    return <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all text-xs text-neutral-700">{truncate(output, compact ? 220 : 4000)}</pre>;
+  }
+
+  return (
+    <div className="space-y-1.5 text-xs">
+      <p className="text-neutral-500">{matches.length === 0 ? "No matching documents" : `${matches.length} matching document${matches.length === 1 ? "" : "s"}`}</p>
+      <ul className="space-y-2">
+        {matches.slice(0, compact ? 2 : 5).map((match, index) => (
+          <li key={`${match.id}-${index}`} className="space-y-0.5 break-words">
+            <p className="font-medium text-neutral-700">
+              {match.url && !compact ? (
+                <a href={match.url} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-violet-700">{truncate(match.title, 240)}</a>
+              ) : truncate(match.title, compact ? 70 : 240)}
+            </p>
+            <p className="text-[11px] text-neutral-500">Citation: <code>{truncate(match.id, 160)}</code></p>
+            <p className="whitespace-pre-wrap leading-relaxed text-neutral-700">{truncate(match.excerpt, compact ? 100 : 1200)}</p>
+          </li>
+        ))}
+      </ul>
+      {compact && matches.length > 2 ? <p className="text-neutral-500">All citations in the Runs panel</p> : null}
+    </div>
+  );
+}
+
+const KnowledgeNodeView = memo(({ id, data, selected }: NodeProps<KnowledgeNode>) => {
+  const { updateNodeData } = useReactFlow<WorkflowNode>();
+  const { results } = useRun();
+  const result = results.get(id);
+  const node: KnowledgeNode = { id, type: "knowledge", position: { x: 0, y: 0 }, data };
+
+  return (
+    <NodeFrame
+      id={id}
+      node={node}
+      selected={selected}
+      icon={<BookOpen className="size-3.5" />}
+      accent="#0d9488"
+      result={result}
+      hasTarget
+      handles={getSourceHandles(node)}
+      summary={
+        <div className="flex flex-col gap-1.5">
+          <p className="text-xs text-neutral-500">Up to {data.topK} matches · lexical search · no AI</p>
+          {result?.output !== undefined ? (
+            <KnowledgeResultPreview output={result.output} compact />
+          ) : (
+            <p className="break-words text-xs text-neutral-700">{truncate(data.query, 140)}</p>
+          )}
+        </div>
+      }
+      editor={
+        <>
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Search query template</FieldLabel>
+            <TextArea rows={3} value={data.query} placeholder="{{input}}" onCommit={(query) => updateNodeData(id, { query })} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Maximum results</FieldLabel>
+            <Select value={data.topK} onChange={(event) => updateNodeData(id, { topK: Number(event.target.value) })}>
+              {[1, 2, 3, 4, 5].map((count) => <option key={count} value={count}>{count}</option>)}
+            </Select>
+          </label>
+          <p className="text-[11px] leading-relaxed text-neutral-500">
+            Use <code>{"{{input}}"}</code> or <code>{"{{answers.<id>}}"}</code>.
+            Searches Thai and English words in the server catalog, without AI or embeddings.
+            Results include citation IDs, titles and excerpts; no matches is a valid result.
+          </p>
+          <p className="text-[11px] leading-relaxed text-neutral-500">
+            An administrator sets the catalog path using{" "}
+            <code className="break-all">WORKFLOW_KNOWLEDGE_FILE</code> on the server.
+            Workflows cannot choose files.
+          </p>
+        </>
+      }
+    />
+  );
+});
+
+/* -------------------------------------------------------------------------- */
 /*                                 Output node                                */
 /* -------------------------------------------------------------------------- */
 
@@ -1399,5 +1642,8 @@ export const nodeTypes: NodeTypes = {
   llm: LlmNodeView,
   condition: ConditionNodeView,
   transform: TransformNodeView,
+  http: HttpNodeView,
+  approval: ApprovalNodeView,
+  knowledge: KnowledgeNodeView,
   output: OutputNodeView,
 };

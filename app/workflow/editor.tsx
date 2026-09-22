@@ -34,6 +34,10 @@ import {
   Eye,
   FileOutput,
   GitBranch,
+  Globe,
+  BookOpen,
+  ClipboardCheck,
+  Clock3,
   MessageSquareText,
   Plus,
   Redo2,
@@ -50,13 +54,16 @@ import {
   type ComponentProps,
 } from "react";
 import { NODE_WIDTH, nodeTypes } from "./nodes";
-import { useRun } from "./run-context";
+import { useApprovalExpired, useRun } from "./run-context";
 import {
   ANY_HANDLE,
   FLOW_STORAGE_KEY,
   IN_HANDLE,
   WORKFLOW_EDGE_TYPE,
   createConditionNode,
+  createHttpNode,
+  createApprovalNode,
+  createKnowledgeNode,
   createInputNode,
   createJevNode,
   createLlmNode,
@@ -87,6 +94,14 @@ function FlowCursor({ userId }: CursorsCursorProps) {
  */
 function RunPreviewBanner() {
   const { selectedRunId, selectRun, messages } = useRun();
+  const pendingExpiry = messages.reduce<number | undefined>(
+    (earliest, message) =>
+      message.status === "waiting" && message.approval && !message.approval.decision
+        ? Math.min(earliest ?? Infinity, message.approval.expiresAt)
+        : earliest,
+    undefined
+  );
+  const expired = useApprovalExpired(pendingExpiry);
 
   if (selectedRunId === null) {
     return null;
@@ -94,15 +109,20 @@ function RunPreviewBanner() {
 
   const running = messages.some((message) => message.status === "running");
   const failed = messages.some((message) => message.status === "error");
-  const label = running
-    ? "Run in progress"
-    : failed
-      ? "Run failed"
-      : "Run preview";
+  const waiting = messages.some((message) => message.status === "waiting");
+  const label = failed
+    ? "Run failed"
+    : expired
+      ? "Approval expired"
+      : running
+        ? "Run in progress"
+        : waiting
+          ? "Waiting for approval · open Runs"
+          : "Run preview";
 
   return (
     <div className="run-preview-banner floating-surface flex items-center gap-2 py-1 pl-3 pr-1 text-xs">
-      <Eye className="size-3.5 text-violet-600" />
+      {waiting ? <Clock3 className="size-3.5 shrink-0 text-amber-700" /> : <Eye className="size-3.5 shrink-0 text-violet-600" />}
       <span className="font-medium text-neutral-800">{label}</span>
       <span className="run-preview-details text-neutral-400">
         {messages.length} node{messages.length === 1 ? "" : "s"} · Esc
@@ -336,6 +356,15 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
         case "transform":
           item = createTransformNode(args);
           break;
+        case "http":
+          item = createHttpNode(args);
+          break;
+        case "approval":
+          item = createApprovalNode(args);
+          break;
+        case "knowledge":
+          item = createKnowledgeNode(args);
+          break;
         case "output":
           item = createOutputNode(args);
           break;
@@ -464,6 +493,36 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
                 <Rows3 className="size-4" />
               </span>{" "}
               Transform
+            </button>
+            <button
+              type="button"
+              onClick={() => addNode("http")}
+              className="toolbar-button hover:bg-sky-50 hover:text-sky-700"
+            >
+              <span className="toolbar-icon bg-sky-50 text-sky-600">
+                <Globe className="size-4" />
+              </span>{" "}
+              HTTP
+            </button>
+            <button
+              type="button"
+              onClick={() => addNode("approval")}
+              className="toolbar-button hover:bg-amber-50 hover:text-amber-700"
+            >
+              <span className="toolbar-icon bg-amber-50 text-amber-600">
+                <ClipboardCheck className="size-4" />
+              </span>{" "}
+              Approval
+            </button>
+            <button
+              type="button"
+              onClick={() => addNode("knowledge")}
+              className="toolbar-button hover:bg-teal-50 hover:text-teal-700"
+            >
+              <span className="toolbar-icon bg-teal-50 text-teal-600">
+                <BookOpen className="size-4" />
+              </span>{" "}
+              Knowledge
             </button>
             {nodes.some((node) => node.type === "output") ? null : (
               <button

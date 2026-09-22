@@ -16,8 +16,10 @@ export function createModuleLoader({ stubs = {}, env = {}, globals = {} } = {}) 
   const modules = new Map();
   async function resolve(specifier, parent = path.join(root, "_test.mjs")) {
     const relative = specifier.startsWith(".");
-    const id = relative ? path.resolve(path.dirname(parent), specifier) : specifier;
+    const unresolved = relative ? path.resolve(path.dirname(parent), specifier) : specifier;
+    const id = relative && !path.extname(unresolved) ? `${unresolved}.ts` : unresolved;
     const stubKey = Object.hasOwn(stubs, specifier) ? specifier
+      : Object.hasOwn(stubs, unresolved) ? unresolved
       : Object.hasOwn(stubs, id) ? id : null;
     if (modules.has(id)) return modules.get(id);
     let mod;

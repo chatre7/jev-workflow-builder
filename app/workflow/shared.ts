@@ -16,6 +16,9 @@ export const OUT_HANDLE = "out";
 export const ANY_HANDLE = "any";
 export const TRUE_HANDLE = "true";
 export const FALSE_HANDLE = "false";
+export const APPROVED_HANDLE = "approved";
+export const REJECTED_HANDLE = "rejected";
+export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 
 export const CONDITION_OPERATORS = [
   { id: "eq", label: "Equals" },
@@ -185,6 +188,28 @@ export type TransformNodeData = {
   activation?: ActivationMode;
 };
 
+export type HttpNodeData = {
+  label: string;
+  connection: string;
+  method: "GET" | "POST";
+  path: string;
+  body: string;
+  activation?: ActivationMode;
+};
+
+export type ApprovalNodeData = {
+  label: string;
+  prompt: string;
+  activation?: ActivationMode;
+};
+
+export type KnowledgeNodeData = {
+  label: string;
+  query: string;
+  topK: number;
+  activation?: ActivationMode;
+};
+
 /**
  * Unique sink, like the input node. Collects parent texts into named output
  * properties, according to the connected target handle.
@@ -238,6 +263,9 @@ export type JevNode = Node<JevNodeData, "jev">;
 export type LlmNode = Node<LlmNodeData, "llm">;
 export type ConditionNode = Node<ConditionNodeData, "condition">;
 export type TransformNode = Node<TransformNodeData, "transform">;
+export type HttpNode = Node<HttpNodeData, "http">;
+export type ApprovalNode = Node<ApprovalNodeData, "approval">;
+export type KnowledgeNode = Node<KnowledgeNodeData, "knowledge">;
 export type OutputNode = Node<OutputNodeData, "output">;
 export type WorkflowNode =
   | InputNode
@@ -245,6 +273,9 @@ export type WorkflowNode =
   | LlmNode
   | ConditionNode
   | TransformNode
+  | HttpNode
+  | ApprovalNode
+  | KnowledgeNode
   | OutputNode;
 export type WorkflowNodeType = WorkflowNode["type"];
 
@@ -309,6 +340,8 @@ export function getSourceHandles(node: WorkflowNode): HandleDef[] {
     case "input":
     case "llm":
     case "transform":
+    case "http":
+    case "knowledge":
       return [{ id: OUT_HANDLE, label: "output", title: "Output text" }];
     case "jev":
       return [
@@ -323,6 +356,11 @@ export function getSourceHandles(node: WorkflowNode): HandleDef[] {
       return [
         { id: TRUE_HANDLE, label: "true", title: "The condition matched" },
         { id: FALSE_HANDLE, label: "false", title: "The condition did not match" },
+      ];
+    case "approval":
+      return [
+        { id: APPROVED_HANDLE, label: "approved", title: "The owner approved this item" },
+        { id: REJECTED_HANDLE, label: "rejected", title: "The owner rejected this item" },
       ];
     case "output":
       return [];
@@ -503,6 +541,77 @@ export function createTransformNode(args: {
     data: {
       label: args.label ?? "Transform",
       fields: args.fields ?? [createTransformField(1)],
+      activation: args.activation ?? "any",
+    },
+  };
+}
+
+export function createHttpNode(args: {
+  id?: string;
+  position: Point;
+  label?: string;
+  connection?: string;
+  method?: "GET" | "POST";
+  path?: string;
+  body?: string;
+  activation?: ActivationMode;
+  selected?: boolean;
+}): HttpNode {
+  return {
+    id: args.id ?? `http-${nanoid(8)}`,
+    type: "http",
+    position: args.position,
+    selected: args.selected,
+    data: {
+      label: args.label ?? "HTTP Request",
+      connection: args.connection ?? "",
+      method: args.method ?? "GET",
+      path: args.path ?? "",
+      body: args.body ?? "",
+      activation: args.activation ?? "any",
+    },
+  };
+}
+
+export function createApprovalNode(args: {
+  id?: string;
+  position: Point;
+  label?: string;
+  prompt?: string;
+  activation?: ActivationMode;
+  selected?: boolean;
+}): ApprovalNode {
+  return {
+    id: args.id ?? `approval-${nanoid(8)}`,
+    type: "approval",
+    position: args.position,
+    selected: args.selected,
+    data: {
+      label: args.label ?? "Human Approval",
+      prompt: args.prompt ?? "Review this item before continuing.",
+      activation: args.activation ?? "any",
+    },
+  };
+}
+
+export function createKnowledgeNode(args: {
+  id?: string;
+  position: Point;
+  label?: string;
+  query?: string;
+  topK?: number;
+  activation?: ActivationMode;
+  selected?: boolean;
+}): KnowledgeNode {
+  return {
+    id: args.id ?? `knowledge-${nanoid(8)}`,
+    type: "knowledge",
+    position: args.position,
+    selected: args.selected,
+    data: {
+      label: args.label ?? "Knowledge Search",
+      query: args.query ?? "{{input}}",
+      topK: args.topK ?? 3,
       activation: args.activation ?? "any",
     },
   };

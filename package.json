@@ -13,7 +13,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-vm-modules --test tests/*.test.mjs",
-    "test:redis": "node --experimental-vm-modules --test tests/redis-admission.integration.mjs"
+    "test:redis": "node --experimental-vm-modules --test tests/*.integration.mjs"
   },
   "dependencies": {
     "@liveblocks/client": "^3.23.0",
@@ -34,7 +34,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.18",
-    "@types/node": "^18.11.19",
+    "@types/node": "^22.20.4",
     "@types/react": "^18.0.38",
     "@types/react-dom": "^18.0.11",
     "postcss": "^8.4.49",

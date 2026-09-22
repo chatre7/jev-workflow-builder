@@ -33,6 +33,8 @@ declare global {
       startedAt: string;
       completedAt?: string;
       error?: string;
+      // Published only after a durable approval checkpoint is acknowledged.
+      approvalToken?: string;
     };
 
     // One message per executed node, written server-side and streamed via

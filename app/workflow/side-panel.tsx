@@ -18,13 +18,18 @@ import {
   ChevronRight,
   FlaskConical,
   GitBranch,
+  Globe,
+  BookOpen,
+  ClipboardCheck,
+  Clock3,
   History,
   Route,
   Rows3,
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useRun } from "./run-context";
+import { useApprovalExpired, useRun } from "./run-context";
+import { KnowledgeResultPreview } from "./nodes";
 import {
   getRunOutput,
   type Answer,
@@ -66,6 +71,8 @@ function RunStatusIcon({ status }: { status: RunStatus | "skipped" }) {
   switch (status) {
     case "running":
       return <Loader2 className="size-3.5 animate-spin text-violet-600" />;
+    case "waiting":
+      return <Clock3 className="size-3.5 shrink-0 text-amber-700" aria-label="Waiting for approval" />;
     case "complete":
       return <Check className="size-3.5 text-emerald-600" />;
     case "error":
@@ -87,6 +94,12 @@ function NodeTypeIcon({ type }: { type: WorkflowNodeType }) {
       return <GitBranch className="size-3.5 text-amber-600" />;
     case "transform":
       return <Rows3 className="size-3.5 text-teal-600" />;
+    case "http":
+      return <Globe className="size-3.5 text-sky-600" />;
+    case "approval":
+      return <ClipboardCheck className="size-3.5 text-amber-600" />;
+    case "knowledge":
+      return <BookOpen className="size-3.5 text-teal-600" />;
     case "output":
       return <FileOutput className="size-3.5 text-emerald-600" />;
   }
@@ -207,16 +220,134 @@ function AnswerView({ id, answer }: { id: string; answer: Answer }) {
 /*                                   Trace                                    */
 /* -------------------------------------------------------------------------- */
 
+function ApprovalReview({
+  message,
+  workflowId,
+  runId,
+}: {
+  message: NodeResultData;
+  workflowId: string;
+  runId: string;
+}) {
+  const approval = message.approval;
+  const expired = useApprovalExpired(approval?.decision ? undefined : approval?.expiresAt);
+  const [submitting, setSubmitting] = useState<"approved" | "rejected" | null>(null);
+  const [accepted, setAccepted] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
+
+  async function decide(decision: "approved" | "rejected") {
+    if (inFlight.current || accepted || unavailable || !approval ||
+        approval.decision || approval.expiresAt <= Date.now() || message.status !== "waiting") return;
+    inFlight.current = true;
+    setSubmitting(decision);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(runId)}/approval`,
+        {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ nodeId: message.nodeId, decision }),
+        }
+      );
+      const json = (await response.json()) as { error?: string; runId?: string; status?: string };
+      if (!response.ok) {
+        if (response.status === 410) setUnavailable(true);
+        throw new Error(
+          json.error ??
+          (response.status === 409
+            ? "This run is busy or the decision was already submitted. Wait for the trace to update."
+            : response.status === 410
+              ? "This approval expired or is no longer available. Start a new run."
+              : `Could not submit the decision (${response.status}).`)
+        );
+      }
+      if (json.runId !== runId || json.status !== "running") {
+        throw new Error("Unexpected response. Check the run trace before submitting again.");
+      }
+      setAccepted(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not submit the decision.");
+    } finally {
+      inFlight.current = false;
+      setSubmitting(null);
+    }
+  }
+
+  if (!approval) return null;
+  const disabled = submitting !== null || accepted || unavailable || expired || message.status !== "waiting";
+
+  return (
+    <div className="space-y-2 border-t border-neutral-100 px-2.5 py-2">
+      <div>
+        <p className="mb-1 text-[11px] font-medium text-neutral-600">Review prompt</p>
+        <p className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-neutral-800">
+          {truncate(approval.prompt, 40_000)}
+        </p>
+      </div>
+      <details>
+        <summary className="cursor-pointer text-[11px] font-medium text-neutral-600">Review input</summary>
+        <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-neutral-700">
+          {truncate(message.input, 32_000) || "(empty input)"}
+        </pre>
+      </details>
+      {approval.decision ? (
+        <p className="break-words text-xs text-neutral-700" role="status">
+          <span className="font-medium">{approval.decision === "approved" ? "Approved" : "Rejected"}</span>
+          {approval.decidedBy ? ` by ${approval.decidedBy}` : ""}
+          {approval.decidedAt !== undefined ? ` · ${new Date(approval.decidedAt).toLocaleString()}` : ""}
+          <span className="mt-1 block text-[11px] text-neutral-500">Original input passed to the {approval.decision} branch.</span>
+        </p>
+      ) : (
+        <>
+          <p className={`text-[11px] ${expired || unavailable ? "text-red-700" : "text-amber-700"}`} role="status">
+            {expired
+              ? "Approval expired. No decision was made; start a new run."
+              : unavailable
+                ? "Approval is no longer available. Start a new run."
+                : message.status !== "waiting"
+                  ? "Review is not available while this run is no longer waiting."
+                  : `Waiting for owner review · expires ${new Date(approval.expiresAt).toLocaleString()}`}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" disabled={disabled} onClick={() => void decide("approved")} className="primary-button !min-h-8 !text-xs">
+              {submitting === "approved" ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Check className="size-3.5" aria-hidden />}
+              {submitting === "approved" ? "Submitting…" : "Approve"}
+            </button>
+            <button type="button" disabled={disabled} onClick={() => void decide("rejected")} className="min-h-8 rounded-md border border-neutral-300 bg-white px-3 text-xs font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50">
+              {submitting === "rejected" ? "Submitting…" : "Reject"}
+            </button>
+          </div>
+          {accepted ? (
+            <p role="status" className="text-[11px] text-neutral-600">Decision received by the server. Waiting for the run trace to update…</p>
+          ) : null}
+        </>
+      )}
+      {error ? <p role="alert" className="break-words text-xs text-red-700">{error}</p> : null}
+    </div>
+  );
+}
+
 function TraceNode({
   message,
   depth,
   onFocus,
+  workflowId,
+  runId,
 }: {
   message: NodeResultData;
   depth: number;
   onFocus: () => void;
+  workflowId: string;
+  runId: string;
 }) {
   const outputs = getRunOutput(message.outputs);
+  const approvalExpired = useApprovalExpired(
+    message.approval?.decision ? undefined : message.approval?.expiresAt
+  );
   const conditionBranch = message.nodeType === "condition"
     ? message.firedHandles?.find(
         (handle) => handle === TRUE_HANDLE || handle === FALSE_HANDLE
@@ -249,9 +380,9 @@ function TraceNode({
             </span>
           ) : null}
           <span className="text-[11px] tabular-nums text-neutral-400">
-            {formatDuration(message.durationMs)}
+            {approvalExpired ? "Expired" : message.status === "waiting" ? "Waiting" : formatDuration(message.durationMs)}
           </span>
-          <RunStatusIcon status={message.status} />
+          <RunStatusIcon status={approvalExpired ? "error" : message.status} />
         </button>
 
         {message.error ? (
@@ -285,6 +416,25 @@ function TraceNode({
           </p>
         ) : null}
 
+        {message.nodeType === "approval" ? (
+          <ApprovalReview key={`${runId}-${message.nodeId}`} message={message} workflowId={workflowId} runId={runId} />
+        ) : null}
+
+        {message.nodeType === "http" && (message.httpStatus !== undefined || message.output !== undefined) ? (
+          <div className="space-y-1 border-t border-neutral-100 px-2.5 py-1.5">
+            {message.httpStatus !== undefined ? <p className="text-xs font-medium text-neutral-700">HTTP {message.httpStatus}</p> : null}
+            <pre aria-label="HTTP response" className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-neutral-700">
+              {truncate(message.output ?? "", 32_000) || "(empty response)"}
+            </pre>
+          </div>
+        ) : null}
+
+        {message.nodeType === "knowledge" && message.output !== undefined ? (
+          <div className="border-t border-neutral-100 px-2.5 py-2">
+            <p className="mb-1 text-[11px] font-medium text-neutral-500">Knowledge results · lexical search · no AI</p>
+            <KnowledgeResultPreview output={message.output} />
+          </div>
+        ) : null}
         {conditionBranch ? (
           <div className="border-t border-neutral-100 px-2.5 py-1.5">
             <p className="text-xs font-medium text-amber-700">
@@ -351,7 +501,7 @@ function TraceNode({
   );
 }
 
-function RunTrace() {
+function RunTrace({ workflowId }: { workflowId: string }) {
   const { messages, isLoading, selectedRunId } = useRun();
   const reactFlow = useReactFlow<WorkflowNode>();
 
@@ -401,6 +551,8 @@ function RunTrace() {
         <TraceNode
           key={message.nodeId}
           message={message}
+          workflowId={workflowId}
+          runId={selectedRunId}
           depth={depths.get(message.nodeId) ?? 0}
           onFocus={() =>
             void reactFlow.fitView({
@@ -450,7 +602,15 @@ function Viewers({ runId }: { runId: string }) {
 function RunList() {
   const { feeds, isLoading } = useFeeds();
   const deleteFeed = useDeleteFeed();
-  const { selectedRunId, selectRun } = useRun();
+  const { selectedRunId, selectRun, messages } = useRun();
+  const pendingExpiry = messages.reduce<number | undefined>(
+    (earliest, message) =>
+      message.status === "waiting" && message.approval && !message.approval.decision
+        ? Math.min(earliest ?? Infinity, message.approval.expiresAt)
+        : earliest,
+    undefined
+  );
+  const selectedExpired = useApprovalExpired(pendingExpiry);
   const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -479,6 +639,9 @@ function RunList() {
 
   async function deleteRun(runId: string) {
     if (deletingRunId !== null) return;
+    const run = runs.find((item) => item.feedId === runId);
+    if (!run || run.metadata.status === "running" ||
+        (run.metadata.status === "waiting" && !(selectedRunId === runId && selectedExpired))) return;
 
     setDeletingRunId(runId);
     setDeleteError(null);
@@ -534,7 +697,7 @@ function RunList() {
                 disabled={deleting}
                 className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-2 py-1 text-left"
               >
-                <RunStatusIcon status={run.metadata.status} />
+                <RunStatusIcon status={selected && selectedExpired ? "error" : run.metadata.status} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[11px] text-neutral-800 font-medium">
                     {run.metadata.input || "(empty input)"}
@@ -542,7 +705,9 @@ function RunList() {
                   <span className="mt-px block text-[10px] tabular-nums text-neutral-500">
                     {formatTime(Number(run.metadata.startedAt))} ·{" "}
                     {run.metadata.trigger === "api" ? "API" : "test run"}
-                    {run.metadata.completedAt
+                    {run.metadata.status === "waiting"
+                      ? selected && selectedExpired ? " · Approval expired" : " · Waiting for approval"
+                      : run.metadata.completedAt
                       ? ` · ${formatDuration(
                           Number(run.metadata.completedAt) -
                             Number(run.metadata.startedAt)
@@ -556,10 +721,13 @@ function RunList() {
                 type="button"
                 className="icon-button run-delete-button mr-1 shrink-0"
                 onClick={() => void deleteRun(run.feedId)}
-                disabled={deletingRunId !== null}
+                disabled={deletingRunId !== null || run.metadata.status === "running" ||
+                  (run.metadata.status === "waiting" && !(selected && selectedExpired))}
                 data-deleting={deleting || undefined}
                 aria-label={`Delete run from ${formatTime(Number(run.metadata.startedAt))}`}
-                title="Delete run"
+                title={run.metadata.status === "waiting" && !(selected && selectedExpired)
+                  ? "Review this run before deleting it; expired approvals can be deleted after selecting the run"
+                  : run.metadata.status === "running" ? "Wait for this run to finish before deleting it" : "Delete run"}
               >
                 {deleting ? (
                   <Loader2 className="size-3 animate-spin" aria-hidden />
@@ -700,7 +868,7 @@ function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
           <RunList />
         </Section>
         <Section title="Execution trace">
-          <RunTrace />
+          <RunTrace workflowId={workflow.workflowId} />
         </Section>
       </div>
     </div>

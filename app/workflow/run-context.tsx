@@ -3,6 +3,7 @@
 import { useFeedMessages, useUpdateMyPresence } from "@liveblocks/react";
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -32,6 +33,12 @@ export function RunProvider({ children }: { children: ReactNode }) {
   const [messages, setMessages] = useState<readonly NodeResultData[]>([]);
   const [isLoading, setLoading] = useState(false);
   const updateMyPresence = useUpdateMyPresence();
+  const selectRun = useCallback((runId: string | null) => {
+    if (runId === selectedRunId) return;
+    // Never pair the previous run's review input with the next run's action URL.
+    setMessages([]);
+    setSelectedRunId(runId);
+  }, [selectedRunId]);
 
   useEffect(() => {
     updateMyPresence({ selectedRunId });
@@ -50,12 +57,12 @@ export function RunProvider({ children }: { children: ReactNode }) {
   const value = useMemo<RunContextValue>(
     () => ({
       selectedRunId,
-      selectRun: setSelectedRunId,
+      selectRun,
       results,
       messages,
       isLoading,
     }),
-    [selectedRunId, results, messages, isLoading]
+    [selectedRunId, selectRun, results, messages, isLoading]
   );
 
   return (
@@ -127,4 +134,25 @@ export function useRun(): RunContextValue {
   }
 
   return context;
+}
+
+export function useApprovalExpired(expiresAt: number | undefined): boolean {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const refresh = () => setNow(Date.now());
+    refresh();
+    if (expiresAt === undefined) return;
+    const timer = window.setTimeout(
+      refresh,
+      Math.max(0, Math.min(expiresAt - Date.now() + 1, 2_147_483_647))
+    );
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [expiresAt]);
+
+  return expiresAt !== undefined && now >= expiresAt;
 }
