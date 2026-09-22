@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import * as csvParse from "csv-parse/sync";
 import { createModuleLoader } from "./load-module.mjs";
 
 function approvalStore() {
@@ -39,6 +40,7 @@ async function harness({ store = approvalStore(), graph, http, llm, knowledge } 
   };
   const load = createModuleLoader({ stubs: {
     nanoid: { nanoid: () => `id${++serial}` },
+    "csv-parse/sync": csvParse,
     "./liveblocks": { getLiveblocks: () => client, readWorkflowGraph: async () => { calls.graph++; return graph; } },
     "./approvals": store,
     "./http": { runHttpRequest: async (options) => { calls.http.push(options); return http ? http(options) : { text: "upstream-result", status: 200 }; } },
@@ -162,6 +164,59 @@ test("sequential approval phases preserve inherited results, execution counts an
   assert.match(limited.error, /Run prompts/);
   assert.equal(h.calls.http.length, 1);
   assert.equal(h.calls.knowledge.length, 0);
+});
+
+test("literal run questions survive multiple frozen approval phases and a server restart", async () => {
+  const h = await harness();
+  const graph = chain(h, ["approval", "approval", "llm"]);
+  h.setGraph(graph);
+  const input = "original-data";
+  const question = "Explain {{input}} without expanding it.\n" + "q".repeat(300);
+  const first = await h.executor.startWorkflowRun({ roomId: "room", input, question, trigger: "test" }).trace$;
+  assert.equal(first.status, "waiting");
+  assert.equal(first.question, question);
+  assert.equal(first.nodes.find((entry) => entry.nodeType === "input").question, question);
+  const second = await h.executor.resumeWorkflowRun(await h.store.claim(first.runId, "approval-0")).trace$;
+  assert.equal(second.status, "waiting");
+  assert.equal(second.question, question);
+  // Neither live graph edits nor a fresh process replace checkpoint state.
+  graph.nodes.find((entry) => entry.type === "llm").data.prompt = "edited live prompt";
+  const restarted = await harness({ store: h.store, graph });
+  const resumed = await restarted.executor.resumeWorkflowRun(await h.store.claim(first.runId, "approval-1")).trace$;
+  assert.equal(resumed.status, "complete", resumed.error);
+  assert.equal(restarted.calls.graph, 0);
+  assert.equal(restarted.calls.llm.length, 1);
+  assert.ok(restarted.calls.llm[0].prompt.startsWith("Reply to original-data"));
+  assert.ok(restarted.calls.llm[0].prompt.endsWith(question));
+  assert.doesNotMatch(restarted.calls.llm[0].prompt, /edited live prompt/);
+  assert.equal(resumed.question, question);
+  assert.equal(resumed.nodes.find((entry) => entry.nodeType === "input").question, question);
+  for (const entry of resumed.nodes.filter((node) => node.nodeType === "approval")) {
+    assert.equal(entry.input, input);
+    assert.equal(entry.output, input);
+    assert.equal(entry.approval.prompt, "Approve original-data?");
+  }
+});
+
+test("approval resume reserves the literal question against the remaining cumulative prompt budget", async () => {
+  for (const overflow of [0, 1]) {
+    const h = await harness();
+    h.setGraph(chain(h, ["approval", "llm"]));
+    const question = "q".repeat(h.shared.MAX_QUESTION_CHARS);
+    const input = "original-data";
+    const waiting = await h.executor.startWorkflowRun({ roomId: "room", input, question, trigger: "test" }).trace$;
+    assert.equal(waiting.status, "waiting");
+    const record = h.store.records.get(waiting.runId);
+    const saved = JSON.parse(record.payload);
+    const { MAX_RUN_PROMPT_CHARS } = await h.load("app/workflow/server/execution-policy");
+    const prompt = "Reply to original-data\n\nQuestion for this run (answer this question using the data above):\n" + question;
+    saved.budget.prompts = MAX_RUN_PROMPT_CHARS - prompt.length + overflow;
+    record.payload = JSON.stringify(saved);
+    const resumed = await h.executor.resumeWorkflowRun(await h.store.claim(waiting.runId, "approval-0")).trace$;
+    assert.equal(resumed.status, overflow ? "error" : "complete", resumed.error);
+    assert.equal(h.calls.llm.length, overflow ? 0 : 1);
+    if (overflow) assert.match(resumed.error, /Run prompts/);
+  }
 });
 
 test("knowledge and HTTP render bounded templates and expose real result text and status", async () => {

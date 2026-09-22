@@ -1,7 +1,7 @@
 "use client";
 
 import { useDeleteFeed, useFeeds, useOthers } from "@liveblocks/react";
-import { useNodesData, useReactFlow } from "@xyflow/react";
+import { useEdges, useNodes, useNodesData, useReactFlow } from "@xyflow/react";
 import {
   AlertCircle,
   Check,
@@ -13,6 +13,7 @@ import {
   Sparkles,
   MessageSquareText,
   FileOutput,
+  FileSpreadsheet,
   CircleDashed,
   ChevronLeft,
   ChevronRight,
@@ -40,8 +41,13 @@ import type { WorkflowSummary } from "./server/liveblocks";
 import {
   FALSE_HANDLE,
   INPUT_NODE_ID,
+  IN_HANDLE,
+  MAX_INPUT_CHARS,
+  MAX_QUESTION_CHARS,
+  OUT_HANDLE,
   TRUE_HANDLE,
   truncate,
+  type CsvNode,
   type WorkflowNode,
   type WorkflowNodeType,
 } from "./shared";
@@ -94,6 +100,8 @@ function NodeTypeIcon({ type }: { type: WorkflowNodeType }) {
       return <GitBranch className="size-3.5 text-amber-600" />;
     case "transform":
       return <Rows3 className="size-3.5 text-teal-600" />;
+    case "csv":
+      return <FileSpreadsheet className="size-3.5 text-teal-600" />;
     case "http":
       return <Globe className="size-3.5 text-sky-600" />;
     case "approval":
@@ -392,9 +400,15 @@ function TraceNode({
         ) : null}
 
         {message.nodeType === "input" ? (
-          <p className="whitespace-pre-wrap border-t border-neutral-100 px-2.5 py-1.5 text-xs leading-relaxed text-neutral-600">
-            {truncate(message.input, 400)}
-          </p>
+          <div className="space-y-2 border-t border-neutral-100 px-2.5 py-1.5 text-xs leading-relaxed text-neutral-600">
+            <p className="whitespace-pre-wrap break-words">{truncate(message.input, 400)}</p>
+            {message.question ? (
+              <div>
+                <p className="font-medium text-neutral-700">Question for this run</p>
+                <p className="whitespace-pre-wrap break-words">{message.question}</p>
+              </div>
+            ) : null}
+          </div>
         ) : null}
 
         {message.answers && Object.keys(message.answers).length > 0 ? (
@@ -449,13 +463,20 @@ function TraceNode({
           </div>
         ) : null}
 
-        {message.nodeType === "transform" &&
+        {(message.nodeType === "transform" || message.nodeType === "csv") &&
         message.output !== undefined &&
         message.status !== "skipped" ? (
           <div className="border-t border-neutral-100 px-2.5 py-1.5">
             <p className="mb-1 text-[10px] font-medium text-neutral-500">
               JSON output · no AI
             </p>
+            {message.nodeType === "csv" && message.csv ? (
+              <p className="mb-1 text-xs font-medium text-neutral-700">
+                {message.csv.rowCount} {message.csv.rowCount === 1 ? "row" : "rows"} ·{" "}
+                {message.csv.columnCount} {message.csv.columnCount === 1 ? "column" : "columns"} ·{" "}
+                {message.csv.headers ? "First row headers" : "No headers"}
+              </p>
+            ) : null}
             <pre
               aria-label="JSON output"
               className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-neutral-700"
@@ -702,6 +723,11 @@ function RunList() {
                   <span className="block truncate text-[11px] text-neutral-800 font-medium">
                     {run.metadata.input || "(empty input)"}
                   </span>
+                  {run.metadata.question ? (
+                    <span className="mt-0.5 block truncate text-[11px] text-neutral-600">
+                      Question: {run.metadata.question}
+                    </span>
+                  ) : null}
                   <span className="mt-px block text-[10px] tabular-nums text-neutral-500">
                     {formatTime(Number(run.metadata.startedAt))} ·{" "}
                     {run.metadata.trigger === "api" ? "API" : "test run"}
@@ -752,17 +778,208 @@ function RunList() {
 /*                                  Runs tab                                  */
 /* -------------------------------------------------------------------------- */
 
+type CsvPreview = {
+  rowCount: number;
+  columnCount: number;
+  headers: boolean;
+  delimiter: string;
+  columns: string[];
+  rows: string[][];
+};
+
+function CsvPreviewTable({ preview }: { preview: CsvPreview }) {
+  return (
+    <div className="mt-2 min-w-0">
+      <p className="text-[11px] font-medium text-neutral-700">
+        {preview.rowCount} data {preview.rowCount === 1 ? "row" : "rows"} ·{" "}
+        {preview.columnCount} {preview.columnCount === 1 ? "column" : "columns"}
+      </p>
+      <p className="mt-0.5 text-[11px] leading-4 text-neutral-600">
+        {preview.delimiter === "\t" ? "Tab" : preview.delimiter === ";" ? "Semicolon" : "Comma"} delimiter ·{" "}
+        {preview.headers ? "First row headers" : "No headers"}
+      </p>
+      <div className="csv-preview-scroll mt-1.5" role="region" aria-label="CSV preview table" tabIndex={0}>
+        <table className="csv-preview-table">
+          <caption className="sr-only">Validated CSV data preview</caption>
+          <thead>
+            <tr>{preview.columns.map((column, index) => <th key={index} scope="col">{column}</th>)}</tr>
+          </thead>
+          <tbody>
+            {preview.rows.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                {row.map((cell, columnIndex) => <td key={columnIndex}>{cell}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-1 text-[11px] leading-4 text-neutral-600">
+        Showing {preview.rows.length ? `first ${preview.rows.length}` : "0"} of {preview.rowCount} data rows and{" "}
+        {preview.columns.length} of {preview.columnCount} columns. Preview only; the run sends all input.
+      </p>
+    </div>
+  );
+}
+
 function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
+  const nodes = useNodes<WorkflowNode>();
+  const edges = useEdges();
   const inputNode = useNodesData<WorkflowNode>(INPUT_NODE_ID);
   const { selectRun } = useRun();
   const [input, setInput] = useState<string | null>(null);
   const [isStarting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [question, setQuestion] = useState("");
+  const [selectedCsvId, setSelectedCsvId] = useState("");
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [isReading, setReading] = useState(false);
+  const [previewAttempt, setPreviewAttempt] = useState(0);
+  const [previewResult, setPreviewResult] = useState<{
+    key: string;
+    data?: CsvPreview;
+    error?: string;
+  } | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const fileReader = useRef<FileReader | null>(null);
+  const fileGeneration = useRef(0);
+  const csvNodes = useMemo(
+    () => nodes.filter((node): node is CsvNode => {
+      if (node.type !== "csv" || inputNode?.type !== "input") return false;
+      const incoming = edges.filter((edge) => edge.target === node.id);
+      return incoming.length > 0 && incoming.every((edge) =>
+        edge.source === INPUT_NODE_ID && edge.sourceHandle === OUT_HANDLE && (edge.targetHandle ?? IN_HANDLE) === IN_HANDLE
+      );
+    }),
+    [nodes, edges, inputNode?.type]
+  );
+  const csvNode = csvNodes.find((node) => node.id === selectedCsvId) ?? csvNodes[0];
+  const hasLlm = nodes.some((node) => node.type === "llm");
+  const csvConfig = JSON.stringify(csvNodes.map((node) => [node.id, node.data.delimiter, node.data.headers]));
+  const uploadContext = JSON.stringify([workflow.workflowId, csvConfig, csvNode?.id]);
+  const currentUploadContext = useRef(uploadContext);
+  currentUploadContext.current = uploadContext;
 
   const sample = inputNode?.type === "input" ? inputNode.data.sample : "";
   const value = input ?? sample;
+  const inputTooLong = value.length > MAX_INPUT_CHARS;
+  const previewKey = JSON.stringify([uploadContext, value, previewAttempt]);
+  const currentPreview = previewResult?.key === previewKey ? previewResult : null;
+  const needsPreview = Boolean(csvNode && value.trim() && !inputTooLong && !fileError && !isReading);
+  const isValidating = needsPreview && !currentPreview;
+  const runDisabled = isStarting || isReading || Boolean(fileError) || inputTooLong ||
+    value.trim() === "" || inputNode?.type !== "input" ||
+    (hasLlm && question.length > MAX_QUESTION_CHARS) ||
+    Boolean(csvNode && !currentPreview?.data);
+
+  function cancelFileRead() {
+    fileGeneration.current += 1;
+    const reader = fileReader.current;
+    fileReader.current = null;
+    if (reader?.readyState === FileReader.LOADING) reader.abort();
+  }
+
+  function changeInput(next: string | null, preserveFileSelection = false) {
+    cancelFileRead();
+    setReading(false);
+    setFileError(null);
+    setFileName(null);
+    setError(null);
+    if (!preserveFileSelection && fileInput.current) fileInput.current.value = "";
+    setInput(next);
+  }
+
+  useEffect(() => {
+    if (fileReader.current) {
+      cancelFileRead();
+      setReading(false);
+      setFileError("CSV settings changed while reading. Choose the file again or enter text below.");
+    }
+  }, [uploadContext]);
+
+  useEffect(() => () => cancelFileRead(), []);
+
+  useEffect(() => {
+    if (!needsPreview || !csvNode) return;
+    const controller = new AbortController();
+    const nodeId = csvNode.id;
+    const delimiter = csvNode.data.delimiter;
+    const headers = csvNode.data.headers;
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch(
+          `/api/workflows/${encodeURIComponent(workflow.workflowId)}/csv-preview`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ input: value, nodeId }),
+            signal: controller.signal,
+          }
+        );
+        const result = await response.json() as CsvPreview & { error?: string };
+        if (!response.ok) throw new Error(result.error ?? `Preview failed (${response.status}).`);
+        if (result.delimiter !== delimiter || result.headers !== headers) {
+          throw new Error("CSV settings are still saving. Retry the preview.");
+        }
+        if (!controller.signal.aborted) setPreviewResult({ key: previewKey, data: result });
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setPreviewResult({
+            key: previewKey,
+            error: err instanceof Error ? err.message : "Couldn't validate the CSV. Retry the preview.",
+          });
+        }
+      }
+    }, 300);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [needsPreview, previewKey, csvNode?.id, csvNode?.data.delimiter, csvNode?.data.headers, value, workflow.workflowId]);
+
+  function chooseFile(file: File | undefined) {
+    if (!file) return;
+    changeInput("", true);
+    setFileName(file.name);
+    if (file.size > MAX_INPUT_CHARS * 3 + 3) {
+      setFileError(`This file is too large. Use a UTF-8 CSV with at most ${MAX_INPUT_CHARS.toLocaleString()} characters, or paste a smaller dataset below.`);
+      return;
+    }
+    const generation = fileGeneration.current;
+    const context = uploadContext;
+    const reader = new FileReader();
+    fileReader.current = reader;
+    setReading(true);
+    reader.onload = () => {
+      if (generation !== fileGeneration.current || context !== currentUploadContext.current) return;
+      fileReader.current = null;
+      setReading(false);
+      try {
+        const decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(reader.result as ArrayBuffer);
+        if (decoded.length > MAX_INPUT_CHARS) {
+          setFileError(`This file exceeds ${MAX_INPUT_CHARS.toLocaleString()} characters. Choose a smaller file or paste a smaller dataset below.`);
+          return;
+        }
+        if (!decoded.trim()) {
+          setFileError("This file is empty. Choose another file or enter CSV below.");
+          return;
+        }
+        setInput(decoded);
+      } catch {
+        setFileError("This file isn't valid UTF-8. Save it as UTF-8 CSV and choose it again, or paste the text below.");
+      }
+    };
+    reader.onerror = () => {
+      if (generation !== fileGeneration.current || context !== currentUploadContext.current) return;
+      fileReader.current = null;
+      setReading(false);
+      setFileError("Couldn't read this file. Choose it again or paste CSV below.");
+    };
+    reader.readAsArrayBuffer(file);
+  }
 
   async function run() {
+    if (runDisabled) return;
     setStarting(true);
     setError(null);
 
@@ -772,7 +989,11 @@ function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ input: value, trigger: "test" }),
+          body: JSON.stringify({
+            input: value,
+            trigger: "test",
+            ...(hasLlm && question.trim() ? { question } : {}),
+          }),
         }
       );
       const json = (await response.json()) as {
@@ -808,27 +1029,101 @@ function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
             </p>
           </div>
         </div>
+        {csvNode ? (
+          <div className="mb-2.5 min-w-0">
+            <label htmlFor="run-csv-file" className="mb-1.5 block text-[11px] font-medium text-neutral-600">
+              CSV file
+            </label>
+            <input
+              ref={fileInput}
+              id="run-csv-file"
+              type="file"
+              accept=".csv,text/csv"
+              aria-describedby="run-csv-help"
+              onChange={(event) => chooseFile(event.target.files?.[0])}
+              className="csv-file-input block w-full min-w-0 text-[11px] text-neutral-600"
+            />
+            <p id="run-csv-help" className="mt-1 text-[11px] leading-4 text-neutral-600">
+              UTF-8 CSV, up to {MAX_INPUT_CHARS.toLocaleString()} characters. Or paste CSV below.
+            </p>
+            {fileName ? (
+              <div className="mt-1 flex min-w-0 items-start gap-2">
+                <p className="min-w-0 flex-1 break-all text-[11px] leading-5 text-neutral-700">
+                  {fileName}{isReading ? " · Reading…" : fileError ? " · Not loaded" : " · Loaded into input"}
+                </p>
+                <button type="button" onClick={() => changeInput("")} className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-neutral-600 hover:bg-neutral-100">
+                  Remove file
+                </button>
+              </div>
+            ) : null}
+            {csvNodes.length > 1 ? (
+              <div className="mt-2">
+                <label htmlFor="run-csv-node" className="mb-1 block text-[11px] font-medium text-neutral-600">Preview CSV node</label>
+                <select id="run-csv-node" value={csvNode.id} onChange={(event) => setSelectedCsvId(event.target.value)} className="workflow-field w-full min-w-0 rounded-md border border-neutral-200 bg-neutral-50 px-2 py-1.5 text-[11px]">
+                  {csvNodes.map((node) => <option key={node.id} value={node.id}>{node.data.label} ({node.id})</option>)}
+                </select>
+              </div>
+            ) : (
+              <p className="mt-1 break-words text-[11px] text-neutral-600">Preview uses {csvNode.data.label} settings.</p>
+            )}
+          </div>
+        ) : null}
         <label
           htmlFor="run-input"
           className="mb-1.5 block text-[11px] font-medium text-neutral-600"
         >
-          Input message
+          {csvNode ? "CSV input" : "Input message"}
         </label>
         <textarea
           id="run-input"
           value={value}
           rows={3}
           placeholder="Text to send to the input node…"
-          onChange={(event) => setInput(event.target.value)}
-          className="workflow-field block w-full resize-y rounded-md border border-neutral-200 bg-neutral-50/70 px-2 py-1.5 text-[11px] leading-5 text-neutral-700 placeholder:text-neutral-400 focus:border-violet-400 focus:bg-white focus:outline-none"
+          onChange={(event) => changeInput(event.target.value)}
+          className="workflow-field block w-full resize-y rounded-md border border-neutral-200 bg-neutral-50/70 px-2 py-1.5 text-[11px] leading-5 text-neutral-700 placeholder:text-neutral-500 focus:border-violet-400 focus:bg-white focus:outline-none"
         />
+        {inputTooLong ? (
+          <p role="alert" className="mt-1 text-[11px] text-red-700">
+            Input exceeds {MAX_INPUT_CHARS.toLocaleString()} characters. Shorten it before running; no data has been truncated.
+          </p>
+        ) : null}
+        {fileError ? <p role="alert" className="mt-1 text-[11px] leading-4 text-red-700">{fileError}</p> : null}
+        {isReading || isValidating ? (
+          <p role="status" className="mt-2 flex items-center gap-1.5 text-[11px] text-neutral-600">
+            <Loader2 className="size-3 animate-spin" aria-hidden />
+            {isReading ? "Reading CSV file…" : "Validating all CSV data…"}
+          </p>
+        ) : null}
+        {csvNode && currentPreview?.data && needsPreview ? <CsvPreviewTable preview={currentPreview.data} /> : null}
+        {csvNode && currentPreview?.error && needsPreview ? (
+          <div className="mt-2">
+            <p role="alert" className="text-[11px] leading-4 text-red-700">{currentPreview.error}</p>
+            <p className="mt-1 text-[11px] leading-4 text-neutral-600">Edit the CSV input or the CSV node settings, choose another file, or retry.</p>
+            <button type="button" onClick={() => setPreviewAttempt((attempt) => attempt + 1)} className="mt-1 min-h-7 rounded-md px-2 text-[11px] text-neutral-600 hover:bg-neutral-100">Retry preview</button>
+          </div>
+        ) : null}
+        {hasLlm ? (
+          <div className="mt-3">
+            <label htmlFor="run-question" className="mb-1.5 block text-[11px] font-medium text-neutral-600">Question for this run <span className="font-normal">(optional)</span></label>
+            <textarea
+              id="run-question"
+              value={question}
+              rows={2}
+              maxLength={MAX_QUESTION_CHARS}
+              onChange={(event) => setQuestion(event.target.value)}
+              aria-describedby="run-question-help run-question-count"
+              placeholder="What would you like to know about this input?"
+              className="workflow-field block w-full resize-y rounded-md border border-neutral-200 bg-neutral-50/70 px-2 py-1.5 text-[11px] leading-5 text-neutral-700 placeholder:text-neutral-500 focus:border-violet-400 focus:bg-white focus:outline-none"
+            />
+            <p id="run-question-help" className="mt-1 text-[11px] leading-4 text-neutral-600">Sent to LLM nodes along with their configured prompt. Leave empty to use only the configured prompt.</p>
+            <p id="run-question-count" className="mt-0.5 text-right text-[10px] tabular-nums text-neutral-500">{question.length.toLocaleString()} / {MAX_QUESTION_CHARS.toLocaleString()}</p>
+          </div>
+        ) : null}
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           <button
             type="button"
             onClick={() => void run()}
-            disabled={
-              isStarting || value.trim() === "" || inputNode?.type !== "input"
-            }
+            disabled={runDisabled}
             title={
               inputNode?.type !== "input"
                 ? "Add an Input node to run the workflow"
@@ -843,10 +1138,10 @@ function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
             )}
             {isStarting ? "Starting…" : "Run"}
           </button>
-          {input !== null && input !== sample ? (
+          {(input !== null && input !== sample) || fileName || fileError ? (
             <button
               type="button"
-              onClick={() => setInput(null)}
+              onClick={() => changeInput(null)}
               className="min-h-7 rounded-md px-2 text-[11px] text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900"
             >
               Reset to sample
@@ -1123,7 +1418,7 @@ export function SidePanel({ workflow }: { workflow: WorkflowSummary }) {
         </button>
       </div>
       {tab === "runs" ? (
-        <RunsTab workflow={workflow} />
+        <RunsTab key={workflow.workflowId} workflow={workflow} />
       ) : (
         <ApiTab workflow={workflow} />
       )}

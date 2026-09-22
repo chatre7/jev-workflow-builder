@@ -3,6 +3,7 @@ import {
   OUTPUT_NODE_ID,
   IN_HANDLE,
   MAX_TRANSFORM_FIELDS,
+  MAX_INPUT_CHARS,
   getOutputProperties,
   getOutputPropertyId,
   getSourceHandles,
@@ -19,7 +20,6 @@ import {
   MAX_GRAPH_NODES,
   MAX_GRAPH_TEXT_CHARS,
   MAX_IDENTIFIER_CHARS,
-  MAX_INPUT_CHARS,
   MAX_LABEL_CHARS,
   MAX_NODE_FAN_IN,
   MAX_OUTPUT_PROPERTIES,
@@ -88,10 +88,12 @@ export function validateQuestions(value: unknown): asserts value is QuestionDef[
   }
 }
 
-export function validateWorkflowGraph(value: unknown): {
+export type ValidatedWorkflowGraph = {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
-} {
+};
+
+export function validateWorkflowGraph(value: unknown): ValidatedWorkflowGraph {
   record(value);
   const { nodes, edges } = value;
   if (!Array.isArray(nodes) || nodes.length < 2 || nodes.length > MAX_GRAPH_NODES) {
@@ -198,6 +200,14 @@ export function validateWorkflowGraph(value: unknown): {
         if (!node.data.query.trim()) throw new ExecutionError("Knowledge Search requires a query.");
         if (typeof node.data.topK !== "number" || !Number.isInteger(node.data.topK) || node.data.topK < 1 || node.data.topK > 5) {
           throw new ExecutionError("Knowledge Search returns between 1 and 5 matches.");
+        }
+        break;
+      case "csv":
+        if (node.data.delimiter !== "," && node.data.delimiter !== ";" && node.data.delimiter !== "\t") {
+          throw new ExecutionError("CSV delimiter must be comma, semicolon, or tab.");
+        }
+        if (typeof node.data.headers !== "boolean") {
+          throw new ExecutionError("CSV requires an explicit header mode.");
         }
         break;
       default:

@@ -105,6 +105,75 @@ Transform and `false` to a customer-draft Transform. The review branch can retai
 `order_id`. This is deterministic routing, not authorization to transfer money.
 Existing graph, input, trace, and output-size limits also apply to these nodes.
 
+### CSV → JSON
+
+Add **CSV** from the canvas toolbar and connect `Input → CSV → Output`, or feed
+it UTF-8 CSV text from an HTTP Request. It runs locally without an AI call.
+The node consumes text; the **Run** panel can read a selected CSV file into Input.
+It does not read arbitrary server disk paths, import a Knowledge catalog, or run
+downstream nodes once per row.
+
+Choose **Comma**, **Semicolon**, or **Tab** explicitly; delimiters are not guessed.
+With **First row headers**, `order_id,amount` followed by `00123,1500` becomes
+`[{"order_id":"00123","amount":"1500"}]`. With **No headers**, every row is retained
+as a string array. All cells stay strings: leading zeros, whitespace, dates,
+booleans, and formula-like text are neither coerced nor evaluated. Output is
+JSON **text**, preserving the existing run API's named arrays of output strings.
+For example, a downstream Transform can select `json.0.order_id` or all of `json`.
+
+To ask questions about the whole table, connect `Input → CSV → LLM → Output`.
+Keep `{{input}}` in the LLM node's **Prompt** where the JSON table should appear.
+Use a general instruction such as `Use this table to answer the question supplied
+for this run: {{input}}`, then type the question in **Question for this run**.
+Avoid leaving unrelated fixed questions in the configured prompt. No For Each
+node is needed.
+Use **System** to request the answer language, preserve identifier strings,
+and instruct the model to treat table cells as data rather than instructions
+and acknowledge missing information. Real answers require the configured
+OpenRouter key; model availability, application quotas, and size limits still
+apply. Verify important arithmetic independently rather than treating an LLM
+answer as an accounting calculation.
+
+The **CSV file** picker appears when a CSV node receives its input directly from
+Input, with no other incoming source. Files must be valid UTF-8 and fit the
+existing 20,000 UTF-16-unit run-input limit. File size is checked before reading,
+then decoded length is checked; invalid files never silently reuse the previous
+input. Manual CSV entry remains available, along with removal and sample reset.
+
+Preview uses that node's saved delimiter and header settings. If several eligible
+CSV nodes exist, select which one to preview. The entire CSV is validated with
+the execution parser before showing the first **5 data rows / 8 columns**; the
+run always receives all input, not the visible subset. Change delimiter/header
+mode in the CSV node and retry preview if its settings are still saving.
+Upload/preview errors and pending validation disable Run.
+
+The browser reads the selected file and sends its text to the owner-only,
+same-origin `POST /api/workflows/WORKFLOW_ID/csv-preview` endpoint. It does not
+store a file blob. Preview makes no AI call and reserves no execution quota.
+Once Run is selected, input text is retained in the existing run trace.
+
+**Question for this run** is optional, up to 4,000 UTF-16 units. It is appended
+literally to every executed LLM node's resolved user prompt, separately from CSV
+data; template-like text inside the question is not expanded. System instructions
+remain unchanged. Leave it empty to use only configured prompts. The question
+appears in run history and input trace and survives approval pauses/restarts.
+Each new question starts a new run; this is not a stateful chat conversation.
+
+The parser accepts a leading BOM, CRLF/LF/CR records, quoted delimiters and
+newlines, and doubled quotes. Truly empty lines are skipped; whitespace-only
+lines are data. Empty input returns `[]`; header-only input also returns `[]`
+while retaining its column count in the trace. Headers are preserved exactly,
+including Unicode; blank, duplicate, `__proto__`, `constructor`, and `prototype`
+headers are rejected. Every record must have the same number of columns.
+
+Limits are **500 data rows**, **64 columns**, **8,000 UTF-16 units per cell**,
+and **128 per header**. Node input and JSON output each allow **32,000 UTF-16
+units**; the initial run input still has its existing **20,000-unit** limit.
+Repeated headers and JSON escaping count toward output size. Malformed quoting,
+inconsistent widths, NUL characters, ill-formed Unicode, and over-limit data
+fail rather than being repaired or truncated. The canvas and execution trace
+show the JSON output, data-row count, column count, and header mode.
+
 ### HTTP Request
 
 Configure named connections in the server-only `WORKFLOW_HTTP_CONNECTIONS` JSON
@@ -216,6 +285,12 @@ curl -X POST "https://your-app.example/api/workflows/WORKFLOW_ID/runs?wait=true"
   -d '{"input":"Please review this support ticket."}'
 ```
 
+The JSON body also accepts optional `"question": "What should this run answer?"`
+(maximum 4,000 UTF-16 units). It requires an LLM reachable from Input. Invalid
+question types, excessive length, and missing reachable LLMs are rejected before
+admission reserves execution quota. Preview is browser-owner-only; run-only API
+tokens cannot access the preview endpoint.
+
 `?wait=true` returns a trace and named output arrays, stopping at `waiting` when
 human review is needed. Without it, the API returns `202` with a run ID and
 continues work through Next.js `after()`. The distributed run reservation stays
@@ -225,8 +300,9 @@ receive `429` with `Retry-After`; Redis unavailability receives `503`.
 
 ### Resource and spending controls
 
-Policy constants live in `app/workflow/server/run-admission.ts`,
-`execution-policy.ts`, and `execution-validation.ts`.
+Policy constants live in `app/workflow/shared.ts`,
+`app/workflow/server/run-admission.ts`, `execution-policy.ts`, and
+`execution-validation.ts`.
 
 | Scope | Limit |
 | --- | --- |
@@ -236,6 +312,7 @@ Policy constants live in `app/workflow/server/run-admission.ts`,
 | Reserved LLM output tokens per UTC day | 5,120,000/workspace, 1,024,000/principal |
 | Output-token reservation per accepted phase | 51,200 (25 executions × 2,048 tokens) |
 | Request body / input | 96 KiB JSON / 20,000 UTF-16 code units |
+| Optional run question | 4,000 UTF-16 code units; included in prompt and trace budgets |
 | Graph / fan-in | 26 nodes, 64 edges, 8 incoming edges/node |
 | Executions / simultaneous provider calls | 25 non-input nodes / 4 per run |
 | Jev questions / criteria | 1–8 questions, 2–16 criteria where applicable |
@@ -294,7 +371,9 @@ npm audit --package-lock-only
 Security regressions use Node's test runner and unchanged application modules
 with isolated external services. They cover authorization, workspace isolation,
 request bounds, graph amplification, provider cancellation, deadlines, HTTP SSRF
-and credential handling, lexical retrieval, and approval resume/replay boundaries.
+and credential handling, lexical retrieval, approval resume/replay boundaries,
+CSV quoting, Unicode, row/column bounds, JSON-size amplification, preview access
+and full-data validation, and literal questions across approval resumes.
 
 The separate Redis integration suite executes the actual Lua admission and
 approval claim/fencing scripts against an ephemeral local Redis container:

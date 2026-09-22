@@ -71,6 +71,8 @@ export type NodeResultData = {
   activation?: "any" | "all";
   // The resolved `input` state this node received.
   input: string;
+  // Input node only: literal question supplied for this run, separate from data.
+  question?: string;
   // Generated/transformed text, or unchanged input for Jev and Condition nodes.
   output?: string;
   // Output node only: parent texts per property, in connection order.
@@ -85,6 +87,7 @@ export type NodeResultData = {
   model?: string;
   httpStatus?: number;
   approval?: ApprovalDetails;
+  csv?: { rowCount: number; columnCount: number; headers: boolean };
   durationMs?: number;
   error?: string;
   startedAt: number;
@@ -95,6 +98,7 @@ export type RunSummary = {
   status: RunStatus;
   trigger: RunTrigger;
   input: string;
+  question?: string;
   startedAt: number;
   completedAt?: number;
   error?: string;

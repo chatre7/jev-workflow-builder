@@ -2,7 +2,6 @@ import { MAX_NODE_EXECUTIONS, RUN_TIMEOUT_MS } from "../runs";
 import { JEV_MODELS, LLM_MODELS, renderTemplate, type AnswerValue } from "../shared";
 
 // Text limits count UTF-16 code units, including JSON escaping for trace limits.
-export const MAX_INPUT_CHARS = 20_000;
 export const MAX_GRAPH_NODES = MAX_NODE_EXECUTIONS + 1;
 export const MAX_GRAPH_EDGES = 64;
 export const MAX_NODE_FAN_IN = 8;
@@ -215,9 +214,12 @@ export function boundedJoin(texts: readonly string[], budget: RunBudget, reserve
 export function boundedTemplates(
   templates: readonly string[],
   context: { input: string; answers: Record<string, AnswerValue> },
-  budget: RunBudget
+  budget: RunBudget,
+  literalChars = 0
 ): string[] {
-  let size = 0;
+  // Reserve literal suffixes before rendering or concatenating any prompt.
+  let size = literalChars;
+  checkLimit(size, MAX_NODE_PROMPT_CHARS, "Node prompt");
   for (const template of templates) {
     let cursor = 0;
     for (const match of template.matchAll(/\{\{\s*([\w.]+)\s*\}\}/g)) {

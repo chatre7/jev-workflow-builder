@@ -6,6 +6,7 @@ import type { Liveblocks as LiveblocksClient } from "@liveblocks/node";
 import {
   MAX_INPUT_PREVIEW,
   MAX_NODE_EXECUTIONS,
+  RUN_TIMEOUT_MS,
   createEmptyOutput,
   getRunOutput,
   type Answer,
@@ -21,6 +22,10 @@ import {
   FALSE_HANDLE,
   OUT_HANDLE,
   TRUE_HANDLE,
+  MAX_CSV_ROWS,
+  MAX_CSV_COLUMNS,
+  MAX_INPUT_CHARS,
+  MAX_QUESTION_CHARS,
   getActivation,
   getOutputProperties,
   getOutputPropertyId,
@@ -37,7 +42,6 @@ import {
   ExecutionError,
   FEED_FINALIZE_TIMEOUT_MS,
   FEED_TIMEOUT_MS,
-  MAX_INPUT_CHARS,
   MAX_NODE_PROMPT_CHARS,
   MAX_NODE_TRACE_CHARS,
   MAX_PROVIDER_CONCURRENCY,
@@ -56,13 +60,14 @@ import {
   jsonSize,
   publicExecutionError,
 } from "./execution-policy";
-import { validateWorkflowGraph } from "./execution-validation";
+import { validateWorkflowGraph, type ValidatedWorkflowGraph } from "./execution-validation";
 import { evaluateCondition, transformData, type DataNodeContext } from "./data-nodes";
 import { getLiveblocks, readWorkflowGraph } from "./liveblocks";
 import { runLlm } from "./llm";
 import { askJev, toTypeSafeQuestions, type JevState } from "./typesafe";
 import { runHttpRequest } from "./http";
 import { searchKnowledge } from "./knowledge";
+import { convertCsv } from "./csv";
 import {
   finishApprovalRun,
   saveApprovalCheckpoint,
@@ -81,6 +86,7 @@ type NodeState = {
 // Unlike an inactive branch (null), blocked ancestry must be reconsidered later.
 const BLOCKED = Symbol("unresolved approval");
 type NodeOutcome = NodeState | null | typeof BLOCKED;
+const RUN_QUESTION_PREFIX = "\n\nQuestion for this run (answer this question using the data above):\n";
 
 function restoreState(state: SavedNodeState): NodeState {
   return { ...state, firedHandles: new Set(state.firedHandles) };
@@ -93,7 +99,10 @@ function saveState(state: NodeState): SavedNodeState {
 export type RunWorkflowOptions = {
   roomId: string;
   input: string;
+  question?: string;
   trigger: RunTrigger;
+  // Authorized, validated snapshot used by question-bearing API requests.
+  graph?: ValidatedWorkflowGraph;
 };
 
 export function startWorkflowRun(options: RunWorkflowOptions): {
@@ -110,7 +119,7 @@ export function resumeWorkflowRun(claim: ClaimedApproval): { runId: string; trac
   return {
     runId: checkpoint.runId,
     trace$: runWorkflow(checkpoint.runId, {
-      roomId: checkpoint.roomId, input: checkpoint.input, trigger: checkpoint.trigger,
+      roomId: checkpoint.roomId, input: checkpoint.input, question: checkpoint.question, trigger: checkpoint.trigger,
     }, claim),
   };
 }
@@ -137,6 +146,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
   let approvalStorageTouched = !!claim;
   let closed = false;
   let error: string | undefined;
+  let question: string | undefined;
   // Reserve metadata, the returned input, and terminal error overhead up front.
   let traceSize = TRACE_FINALIZATION_RESERVE_CHARS;
   let outputSize = 0;
@@ -210,6 +220,12 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
   try {
     if (typeof input !== "string") throw new ExecutionError("Run input must be text.");
     checkLimit(input.length, MAX_INPUT_CHARS, "Run input");
+    if (options.question !== undefined) {
+      if (typeof options.question !== "string") throw new ExecutionError("Run question must be text.");
+      checkLimit(options.question.length, MAX_QUESTION_CHARS, "Run question");
+      question = options.question.trim() ? options.question : undefined;
+    }
+    if (question) metadata.question = truncate(question, MAX_INPUT_PREVIEW);
     if (saved) {
       budget = new RunBudget(saved.budget);
       checkLimit(executions, MAX_NODE_EXECUTIONS, "Node executions");
@@ -231,6 +247,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
       traceSize += outputSize;
     }
     traceSize += jsonSize(input, MAX_RUN_TRACE_CHARS, "Run input");
+    if (question) traceSize += jsonSize(question, MAX_RUN_TRACE_CHARS, "Run question");
     checkLimit(traceSize, MAX_RUN_TRACE_CHARS, "Run trace");
     liveblocks = getLiveblocks();
     if (saved) {
@@ -242,7 +259,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
         { roomId, feedId: runId, metadata }, { signal: requestSignal }
       ));
     }
-    const snapshot = saved?.graph ?? await boundedOperation(
+    const snapshot = saved?.graph ?? options.graph ?? await boundedOperation(
       (requestSignal) => readWorkflowGraph(roomId, requestSignal), STORAGE_TIMEOUT_MS, signal
     );
     active();
@@ -271,6 +288,9 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
     outputProperties = getOutputProperties(outputNode.data);
     const reachable = getReachableNodeIds(nodes, edges);
     const activeNodes = nodes.filter((node) => reachable.has(node.id));
+    if (question && !activeNodes.some((node) => node.type === "llm")) {
+      throw new ExecutionError("A run question requires an LLM node reachable from Input.");
+    }
     const activeEdges = edges.filter((edge) => reachable.has(edge.source) && reachable.has(edge.target));
     const order = topologicalOrder(activeNodes, activeEdges)!;
 
@@ -286,6 +306,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
           await writeMessage({
             nodeId: node.id, nodeType: "input", label: node.data.label,
             status: "complete", parentNodeIds: [], input, output: input,
+            ...(question ? { question } : {}),
             firedHandles: [OUT_HANDLE], durationMs: 0, startedAt: nodeStartedAt,
           });
           return { output: input, answers: {}, firedHandles: new Set([OUT_HANDLE]) };
@@ -337,6 +358,27 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
           } });
           return BLOCKED;
         }
+        if (node.type === "csv") {
+          // Reserve space for bounded conversion metadata before serializing output.
+          const outputBaseSize = jsonSize({
+            ...base, status: "complete", output: "", firedHandles: [OUT_HANDLE],
+            csv: { rowCount: MAX_CSV_ROWS, columnCount: MAX_CSV_COLUMNS, headers: false },
+            durationMs: RUN_TIMEOUT_MS,
+          }, MAX_NODE_TRACE_CHARS, "Node trace");
+          const result = convertCsv(node.data, nodeInput, (textSize, serializedSize) => {
+            active();
+            budget.text(textSize);
+            const size = outputBaseSize + serializedSize - 2;
+            checkLimit(size, MAX_NODE_TRACE_CHARS, "Node trace");
+            checkLimit(traceSize - (messageSizes.get(node.id) ?? 0) + size, MAX_RUN_TRACE_CHARS, "Run trace");
+          });
+          await writeMessage({
+            ...base, status: "complete", output: result.text, firedHandles: [OUT_HANDLE],
+            csv: { rowCount: result.rowCount, columnCount: result.columnCount, headers: node.data.headers },
+            durationMs: Date.now() - nodeStartedAt,
+          });
+          return { output: result.text, answers, firedHandles: new Set([OUT_HANDLE]) };
+        }
         if (node.type === "http" || node.type === "knowledge") {
           let output: string;
           let httpStatus: number | undefined;
@@ -381,7 +423,12 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
           return { output: nodeInput, answers, firedHandles };
         }
         if (node.type === "llm") {
-          const [prompt, system] = boundedTemplates([node.data.prompt, node.data.system], { input: nodeInput, answers }, budget);
+          const [resolvedPrompt, system] = boundedTemplates(
+            [node.data.prompt, node.data.system], { input: nodeInput, answers }, budget,
+            question ? RUN_QUESTION_PREFIX.length + question.length : 0
+          );
+          // Only saved node templates expand; run questions always remain literal.
+          const prompt = question ? resolvedPrompt + RUN_QUESTION_PREFIX + question : resolvedPrompt;
           if (!prompt) {
             await writeMessage({ ...base, status: "skipped", output: nodeInput, firedHandles: [OUT_HANDLE], durationMs: Date.now() - nodeStartedAt });
             return { output: nodeInput, answers, firedHandles: new Set([OUT_HANDLE]) };
@@ -501,6 +548,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
     if (pending.size > 0) {
       const checkpoint: ApprovalCheckpoint = {
         version: 1, roomId, runId, input, trigger, startedAt, graph: { nodes, edges },
+        ...(question ? { question } : {}),
         states: [...settled].map(([nodeId, state]) => ({ nodeId, state: state && saveState(state) })),
         pending: [...pending.values()], messages: [...messages.values()],
         budget: budget.snapshot(), executions,
@@ -575,6 +623,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
   return {
     runId, status: error ? "error" : waiting ? "waiting" : "complete", trigger,
     input: typeof input === "string" && input.length <= MAX_INPUT_CHARS ? input : "",
+    ...(question ? { question } : {}),
     startedAt, ...(!waiting || error ? { completedAt } : {}), ...(error ? { error } : {}),
     output: outputMessage ? getRunOutput(outputMessage.outputs) : createEmptyOutput(outputProperties),
     nodes: [...messages.values()].sort((a, b) => a.startedAt - b.startedAt),

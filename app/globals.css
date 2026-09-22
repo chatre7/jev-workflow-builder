@@ -527,6 +527,7 @@ select:disabled {
   z-index: 5;
   display: flex;
   width: 320px;
+  min-width: 0;
   min-height: 0;
   flex-shrink: 0;
   flex-direction: column;
@@ -534,14 +535,83 @@ select:disabled {
   background: #fff;
 }
 
+.workflow-side-panel .runs-tab {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.workflow-side-panel .run-history {
+  flex: 1 0 auto;
+  overflow: visible;
+}
+
 .run-composer {
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .run-history {
   background: #fcfcfb;
   scrollbar-width: thin;
   scrollbar-color: #d8d5de transparent;
+}
+
+.csv-file-input::file-selector-button {
+  margin-right: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--workspace-border);
+  border-radius: 6px;
+  background: #fafaf9;
+  color: #525252;
+  cursor: pointer;
+}
+
+.csv-file-input::file-selector-button:hover {
+  background: #f0eff3;
+}
+
+.csv-preview-scroll {
+  max-width: 100%;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--workspace-border);
+  border-radius: 6px;
+}
+
+.csv-preview-scroll:focus-visible {
+  outline: 2px solid var(--workspace-accent);
+  outline-offset: 2px;
+}
+
+.csv-preview-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #525252;
+}
+
+.csv-preview-table th,
+.csv-preview-table td {
+  min-width: 80px;
+  max-width: 180px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--workspace-border);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.csv-preview-table th {
+  background: #f7f7f4;
+  color: #404040;
+  font-weight: 600;
+}
+
+.csv-preview-table tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 .panel-empty-state {
@@ -634,16 +704,6 @@ select:disabled {
   outline-offset: -2px;
 }
 
-@media (max-height: 700px) {
-  .workflow-side-panel .runs-tab {
-    overflow-y: auto;
-  }
-
-  .workflow-side-panel .run-history {
-    flex: none;
-    overflow: visible;
-  }
-}
 
 @media (max-width: 760px) {
   .workspace-header {
@@ -667,14 +727,6 @@ select:disabled {
     border-left: 0;
   }
 
-  .workflow-side-panel .runs-tab {
-    overflow-y: auto;
-  }
-
-  .workflow-side-panel .run-history {
-    flex: none;
-    overflow: visible;
-  }
 
   .panel-collapsed {
     width: 100%;

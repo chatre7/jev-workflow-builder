@@ -25,6 +25,7 @@
     "@upstash/redis": "^1.39.0",
     "@xyflow/react": "^12.10.1",
     "ai": "^6.0.136",
+    "csv-parse": "^7.0.2",
     "lucide-react": "^0.475.0",
     "nanoid": "^5.1.7",
     "next": "^16.2.12",

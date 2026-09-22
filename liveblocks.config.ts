@@ -30,6 +30,8 @@ declare global {
       trigger: RunTrigger;
       // The text the run started with, truncated for display in the run list.
       input: string;
+      // Optional short preview; the input message retains the complete question.
+      question?: string;
       startedAt: string;
       completedAt?: string;
       error?: string;

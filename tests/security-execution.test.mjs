@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { Redis } from "@upstash/redis";
+import * as csvParse from "csv-parse/sync";
 import { createModuleLoader } from "./load-module.mjs";
 
 function fixtures(shared, kind = "llm") {
@@ -42,6 +43,7 @@ async function harness({ streamText, readGraph, clientOverrides = {}, env = {}, 
       nanoid: { nanoid: () => `id${++serial}` },
       "@openrouter/ai-sdk-provider": { createOpenRouter },
       "@upstash/redis": { Redis },
+      "csv-parse/sync": csvParse,
       "./auth": { getPrincipal: async () => null },
       "./liveblocks": { getWorkspaceId: () => "private", getLiveblocks: () => client, readWorkflowGraph: (...args) => readGraph ? readGraph(...args) : Promise.resolve(graph) },
       ai: { streamText: streamText ?? (() => ({ textStream: (async function* () { yield "A helpful reply."; })() })) },
@@ -641,6 +643,8 @@ test("connected node configuration fails validation before execution", async () 
     h.shared.createKnowledgeNode({ id: "middle", position: { x: 1, y: 0 }, topK: 6 }),
     h.shared.createKnowledgeNode({ id: "middle", position: { x: 1, y: 0 }, query: " " }),
     h.shared.createApprovalNode({ id: "middle", position: { x: 1, y: 0 }, prompt: "" }),
+    h.shared.createCsvNode({ id: "middle", position: { x: 1, y: 0 }, delimiter: "|" }),
+    h.shared.createCsvNode({ id: "middle", position: { x: 1, y: 0 }, headers: "true" }),
   ];
   for (const node of variants) {
     const graph = fixtures(h.shared);
@@ -648,4 +652,120 @@ test("connected node configuration fails validation before execution", async () 
     graph.edges[1].sourceHandle = node.type === "approval" ? "approved" : "out";
     assert.throws(() => validateWorkflowGraph(graph));
   }
+});
+
+test("CSV arrays remain consumable by Transform without coercing identifiers", async () => {
+  const h = await harness();
+  const s = h.shared;
+  h.setGraph({
+    nodes: [
+      s.createInputNode({ position: { x: 0, y: 0 } }),
+      s.createCsvNode({ id: "csv", position: { x: 1, y: 0 } }),
+      s.createTransformNode({ id: "project", position: { x: 2, y: 0 }, fields: [
+        { id: "order", name: "first_order", source: "json.0.order_id" },
+        { id: "rows", name: "rows", source: "json" },
+      ] }),
+      s.createOutputNode({ position: { x: 3, y: 0 } }),
+    ],
+    edges: [
+      s.createWorkflowEdge({ source: "input", sourceHandle: "out", target: "csv" }),
+      s.createWorkflowEdge({ source: "csv", sourceHandle: "out", target: "project" }),
+      s.createWorkflowEdge({ source: "project", sourceHandle: "out", target: "output", targetHandle: "customer" }),
+    ],
+  });
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({
+    roomId: "private-room", input: 'order_id,note\r\n00123,"ไทย, ""quoted""\nnext line"\r\n', trigger: "test",
+  }).trace$;
+  assert.equal(trace.status, "complete", trace.error);
+  assert.deepEqual(JSON.parse(trace.output.customer[0]), {
+    first_order: "00123", rows: [{ order_id: "00123", note: 'ไทย, "quoted"\nnext line' }],
+  });
+});
+
+test("run questions stay literal at the provider boundary without contaminating CSV or system text", async () => {
+  const calls = [];
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    streamText: (options) => {
+      calls.push(options);
+      return { textStream: (async function* () { yield "answer"; })() };
+    },
+  });
+  const s = h.shared;
+  const question = 'Keep {{input}} and {{answers.secret}} literal.\n' + "q".repeat(300);
+  const input = 'id,note\n001,"two, fields"\n';
+  h.setGraph({
+    nodes: [
+      s.createInputNode({ position: { x: 0, y: 0 } }),
+      s.createCsvNode({ id: "csv", position: { x: 1, y: 0 } }),
+      s.createLlmNode({ id: "first", position: { x: 2, y: 0 }, prompt: "Analyze {{input}}", system: "Only analyze data." }),
+      s.createLlmNode({ id: "second", position: { x: 3, y: 0 }, prompt: "Review {{input}}", system: "Only review data." }),
+      s.createOutputNode({ position: { x: 4, y: 0 } }),
+    ],
+    edges: [["input", "csv"], ["csv", "first"], ["first", "second"], ["second", "output"]].map(([source, target]) =>
+      s.createWorkflowEdge({ source, sourceHandle: "out", target, targetHandle: target === "output" ? "customer" : "in" })),
+  });
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "room", input, question, trigger: "test" }).trace$;
+  assert.equal(trace.status, "complete", trace.error);
+  const suffix = "\n\nQuestion for this run (answer this question using the data above):\n" + question;
+  assert.deepEqual(calls.map(({ prompt }) => prompt), [
+    'Analyze [{"id":"001","note":"two, fields"}]' + suffix,
+    "Review answer" + suffix,
+  ]);
+  assert.deepEqual(calls.map(({ system }) => system), ["Only analyze data.", "Only review data."]);
+  const inputTrace = trace.nodes.find((node) => node.nodeType === "input");
+  assert.equal(inputTrace.input, input);
+  assert.equal(inputTrace.output, input);
+  assert.equal(inputTrace.question, question);
+  assert.equal(trace.question, question);
+  assert.equal(trace.nodes.find((node) => node.nodeType === "csv").input, input);
+  assert.deepEqual(JSON.parse(trace.nodes.find((node) => node.nodeType === "csv").output), [{ id: "001", note: "two, fields" }]);
+  const { MAX_INPUT_PREVIEW } = await h.load("app/workflow/runs");
+  assert.equal(h.events.at(-1).metadata.question, question.slice(0, MAX_INPUT_PREVIEW - 1) + "…");
+});
+
+test("combined resolved prompt, system and question enforce the node boundary before provider work", async () => {
+  let calls = 0;
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    streamText: () => { calls++; return { textStream: (async function* () { yield "answer"; })() }; },
+  });
+  const { MAX_NODE_PROMPT_CHARS } = await h.load("app/workflow/server/execution-policy");
+  const question = "q".repeat(h.shared.MAX_QUESTION_CHARS);
+  const prefix = "\n\nQuestion for this run (answer this question using the data above):\n";
+  const remaining = MAX_NODE_PROMPT_CHARS - prefix.length - question.length - "system".length;
+  const graph = fixtures(h.shared);
+  graph.nodes[1].data.prompt = "{{input}}{{input}}" + "x".repeat(remaining % 2);
+  graph.nodes[1].data.system = "system";
+  h.setGraph(graph);
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const input = "x".repeat(Math.floor(remaining / 2));
+  const accepted = await startWorkflowRun({ roomId: "room", input, question, trigger: "test" }).trace$;
+  assert.equal(accepted.status, "complete", accepted.error);
+  const denied = await startWorkflowRun({ roomId: "room", input: input + "x", question, trigger: "test" }).trace$;
+  assert.equal(denied.status, "error");
+  assert.match(denied.error, /Node prompt/);
+  assert.equal(calls, 1);
+});
+
+test("internal callers cannot bypass question validation or silently ignore questions", async () => {
+  let reads = 0;
+  const h = await harness({ readGraph: () => { reads++; return fixtures(h.shared, "transform"); } });
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  for (const question of [null, 42, "x".repeat(h.shared.MAX_QUESTION_CHARS + 1)]) {
+    const trace = await startWorkflowRun({ roomId: "room", input: "data", question, trigger: "test" }).trace$;
+    assert.equal(trace.status, "error");
+    assert.equal(h.events.length, 0);
+  }
+  assert.equal(reads, 0);
+  const trace = await startWorkflowRun({ roomId: "room", input: "data", question: "Summarize", trigger: "test" }).trace$;
+  assert.equal(trace.status, "error");
+  assert.match(trace.error, /reachable/);
+  assert.equal(trace.nodes.length, 0);
+  const blank = await startWorkflowRun({ roomId: "room", input: "data", question: " \n\t ", trigger: "test" }).trace$;
+  assert.equal(blank.status, "complete", blank.error);
+  assert.equal(blank.question, undefined);
+  assert.equal(blank.nodes.find((node) => node.nodeType === "input").question, undefined);
 });

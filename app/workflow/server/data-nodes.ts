@@ -120,7 +120,7 @@ export function evaluateCondition(data: ConditionNodeData, context: DataNodeCont
 
 // jsonSize has already bounded the mapped JSON and its depth. Count only the
 // extra escaping when that JSON becomes a string inside the persisted trace.
-function traceEscapes(value: unknown): number {
+export function traceEscapes(value: unknown): number {
   if (typeof value === "string") {
     let count = 2;
     for (let i = 0; i < value.length; i++) {

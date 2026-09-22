@@ -1,7 +1,10 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import type { RunTrigger } from "../../../../workflow/runs";
+import { MAX_INPUT_CHARS, MAX_QUESTION_CHARS, getReachableNodeIds } from "../../../../workflow/shared";
 import { startWorkflowRun } from "../../../../workflow/server/executor";
-import { getRoomId, getWorkflow } from "../../../../workflow/server/liveblocks";
+import { getRoomId, getWorkflow, readWorkflowGraph } from "../../../../workflow/server/liveblocks";
+import { ExecutionError, STORAGE_TIMEOUT_MS, boundedOperation } from "../../../../workflow/server/execution-policy";
+import { validateWorkflowGraph, type ValidatedWorkflowGraph } from "../../../../workflow/server/execution-validation";
 import { acquireRunLease } from "../../../../workflow/server/run-admission";
 import {
   ApiError,
@@ -27,9 +30,16 @@ export async function POST(
     if (typeof body.input !== "string" || body.input.trim() === "") {
       throw new ApiError(400, "`input` must be a non-empty string.");
     }
-    if (body.input.length > 20_000) {
+    if (body.input.length > MAX_INPUT_CHARS) {
       throw new ApiError(413, "`input` must be at most 20,000 characters.");
     }
+    if (body.question !== undefined && typeof body.question !== "string") {
+      throw new ApiError(400, "`question` must be a string.");
+    }
+    if (typeof body.question === "string" && body.question.length > MAX_QUESTION_CHARS) {
+      throw new ApiError(413, "`question` must be at most 4,000 characters.");
+    }
+    const question = typeof body.question === "string" && body.question.trim() ? body.question : undefined;
     if (body.trigger !== undefined && body.trigger !== "test" && body.trigger !== "api") {
       throw new ApiError(400, "`trigger` must be test or api.");
     }
@@ -41,12 +51,29 @@ export async function POST(
     if (!workflow) throw new ApiError(404, "Workflow not found.");
 
     const roomId = getRoomId(workflowId);
+    let graph: ValidatedWorkflowGraph | undefined;
+    if (question) {
+      const snapshot = await boundedOperation(
+        (signal) => readWorkflowGraph(roomId, signal), STORAGE_TIMEOUT_MS
+      );
+      try {
+        graph = validateWorkflowGraph(snapshot);
+        const { nodes, edges } = graph;
+        const reachable = getReachableNodeIds(nodes, edges);
+        if (!nodes.some((node) => node.type === "llm" && reachable.has(node.id))) {
+          throw new ApiError(400, "A run question requires an LLM node reachable from Input.");
+        }
+      } catch (error) {
+        if (error instanceof ExecutionError) throw new ApiError(400, error.message);
+        throw error;
+      }
+    }
     const trigger: RunTrigger = principal.id === "api:automation" ? "api"
       : body.trigger === "test" ? "test" : "api";
     const lease = await acquireRunLease(principal.id, roomId);
     let run;
     try {
-      run = startWorkflowRun({ roomId, input: body.input, trigger });
+      run = startWorkflowRun({ roomId, input: body.input, question, trigger, graph });
     } catch (error) {
       await lease.release();
       throw error;

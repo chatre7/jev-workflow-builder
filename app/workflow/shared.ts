@@ -32,6 +32,13 @@ export const CONDITION_OPERATORS = [
 export type ConditionOperator = (typeof CONDITION_OPERATORS)[number]["id"];
 export const MAX_TRANSFORM_FIELDS = 8;
 export const MAX_DATA_SOURCE_CHARS = 256;
+export const MAX_CSV_ROWS = 500;
+export const MAX_CSV_COLUMNS = 64;
+export const MAX_CSV_FIELD_CHARS = 8_000;
+export const MAX_CSV_HEADER_CHARS = 128;
+// Run text limits count UTF-16 code units.
+export const MAX_INPUT_CHARS = 20_000;
+export const MAX_QUESTION_CHARS = 4_000;
 
 // Text models verified against https://openrouter.ai/api/v1/models.
 export const LLM_MODEL_GROUPS = [
@@ -210,6 +217,13 @@ export type KnowledgeNodeData = {
   activation?: ActivationMode;
 };
 
+export type CsvNodeData = {
+  label: string;
+  delimiter: "," | ";" | "\t";
+  headers: boolean;
+  activation?: ActivationMode;
+};
+
 /**
  * Unique sink, like the input node. Collects parent texts into named output
  * properties, according to the connected target handle.
@@ -266,6 +280,7 @@ export type TransformNode = Node<TransformNodeData, "transform">;
 export type HttpNode = Node<HttpNodeData, "http">;
 export type ApprovalNode = Node<ApprovalNodeData, "approval">;
 export type KnowledgeNode = Node<KnowledgeNodeData, "knowledge">;
+export type CsvNode = Node<CsvNodeData, "csv">;
 export type OutputNode = Node<OutputNodeData, "output">;
 export type WorkflowNode =
   | InputNode
@@ -276,6 +291,7 @@ export type WorkflowNode =
   | HttpNode
   | ApprovalNode
   | KnowledgeNode
+  | CsvNode
   | OutputNode;
 export type WorkflowNodeType = WorkflowNode["type"];
 
@@ -342,6 +358,7 @@ export function getSourceHandles(node: WorkflowNode): HandleDef[] {
     case "transform":
     case "http":
     case "knowledge":
+    case "csv":
       return [{ id: OUT_HANDLE, label: "output", title: "Output text" }];
     case "jev":
       return [
@@ -612,6 +629,29 @@ export function createKnowledgeNode(args: {
       label: args.label ?? "Knowledge Search",
       query: args.query ?? "{{input}}",
       topK: args.topK ?? 3,
+      activation: args.activation ?? "any",
+    },
+  };
+}
+
+export function createCsvNode(args: {
+  id?: string;
+  position: Point;
+  label?: string;
+  delimiter?: CsvNodeData["delimiter"];
+  headers?: boolean;
+  activation?: ActivationMode;
+  selected?: boolean;
+}): CsvNode {
+  return {
+    id: args.id ?? `csv-${nanoid(8)}`,
+    type: "csv",
+    position: args.position,
+    selected: args.selected,
+    data: {
+      label: args.label ?? "CSV → JSON",
+      delimiter: args.delimiter ?? ",",
+      headers: args.headers ?? true,
       activation: args.activation ?? "any",
     },
   };

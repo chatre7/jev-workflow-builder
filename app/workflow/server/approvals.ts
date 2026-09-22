@@ -24,6 +24,7 @@ export type ApprovalCheckpoint = {
   roomId: string;
   runId: string;
   input: string;
+  question?: string;
   trigger: RunTrigger;
   startedAt: number;
   graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] };

@@ -33,6 +33,7 @@ import {
   Bot,
   Eye,
   FileOutput,
+  FileSpreadsheet,
   GitBranch,
   Globe,
   BookOpen,
@@ -61,6 +62,7 @@ import {
   IN_HANDLE,
   WORKFLOW_EDGE_TYPE,
   createConditionNode,
+  createCsvNode,
   createHttpNode,
   createApprovalNode,
   createKnowledgeNode,
@@ -356,6 +358,9 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
         case "transform":
           item = createTransformNode(args);
           break;
+        case "csv":
+          item = createCsvNode(args);
+          break;
         case "http":
           item = createHttpNode(args);
           break;
@@ -493,6 +498,16 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
                 <Rows3 className="size-4" />
               </span>{" "}
               Transform
+            </button>
+            <button
+              type="button"
+              onClick={() => addNode("csv")}
+              className="toolbar-button hover:bg-teal-50 hover:text-teal-700"
+            >
+              <span className="toolbar-icon bg-teal-50 text-teal-600">
+                <FileSpreadsheet className="size-4" />
+              </span>{" "}
+              CSV
             </button>
             <button
               type="button"

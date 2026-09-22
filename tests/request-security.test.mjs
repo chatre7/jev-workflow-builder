@@ -72,10 +72,12 @@ test("run endpoint denies before side effects and fails closed when shared quota
   const load = createModuleLoader({
     env: { NEXTAUTH_URL: "https://workflow.example" },
     stubs: {
+      nanoid: { nanoid: () => "test-id" },
       "./auth": { getPrincipal: async () => principal },
       "next/server": { NextResponse: Response, after: () => {} },
       "../../../../workflow/server/liveblocks": {
         getWorkflow: async () => ({ workflowId: "test" }), getRoomId: () => "private-room",
+        readWorkflowGraph: async () => { throw new Error("No question should not pre-read graph"); },
       },
       "../../../../workflow/server/run-admission": {
         acquireRunLease: async () => { admissions++; throw new Error("Redis unavailable"); },
@@ -96,4 +98,61 @@ test("run endpoint denies before side effects and fails closed when shared quota
   authenticated.nextUrl = new URL(authenticated.url);
   assert.equal((await route.POST(authenticated, params)).status, 503);
   assert.equal(executions, 0);
+});
+
+test("run questions reject invalid types, UTF-16 overflow and unreachable LLMs before admission", async () => {
+  let graph;
+  let serial = 0;
+  let admissions = 0;
+  let executions = 0;
+  let reads = 0;
+  const load = createModuleLoader({
+    env: { NEXTAUTH_URL: "https://workflow.example" },
+    stubs: {
+      nanoid: { nanoid: () => `id${++serial}` },
+      "./auth": { getPrincipal: async () => member },
+      "next/server": { NextResponse: Response, after: () => {} },
+      "../../../../workflow/server/liveblocks": {
+        getWorkflow: async () => ({ workflowId: "test" }), getRoomId: () => "private-room",
+        readWorkflowGraph: async () => { reads++; return graph; },
+      },
+      "../../../../workflow/server/run-admission": {
+        acquireRunLease: async () => { admissions++; return { release: async () => {} }; },
+      },
+      "../../../../workflow/server/executor": {
+        startWorkflowRun: () => {
+          executions++;
+          return { runId: "run-test", trace$: Promise.resolve({ status: "complete" }) };
+        },
+      },
+    },
+  });
+  const route = await load("app/api/workflows/[workflowId]/runs/route.ts");
+  const s = await load("app/workflow/shared");
+  async function post(question) {
+    const req = request({ input: "data", question }, { origin: "https://workflow.example" });
+    req.nextUrl = new URL(req.url);
+    return route.POST(req, { params: Promise.resolve({ workflowId: "test" }) });
+  }
+  for (const question of [null, 42, {}, []]) assert.equal((await post(question)).status, 400);
+  assert.equal((await post("😀".repeat(s.MAX_QUESTION_CHARS / 2) + "x")).status, 413);
+  assert.equal(reads, 0);
+  graph = {
+    nodes: [
+      s.createInputNode({ position: { x: 0, y: 0 } }),
+      s.createLlmNode({ id: "disconnected", position: { x: 1, y: 0 } }),
+      s.createOutputNode({ position: { x: 2, y: 0 } }),
+    ],
+    edges: [s.createWorkflowEdge({ source: "input", sourceHandle: "out", target: "output", targetHandle: "customer" })],
+  };
+  assert.equal((await post("Summarize")).status, 400);
+  assert.equal(admissions, 0);
+  assert.equal(executions, 0);
+  // Blank questions preserve ordinary no-question runs, even without an LLM.
+  assert.equal((await post(" \n\t ")).status, 202);
+  assert.equal(reads, 1);
+  graph.edges.push(s.createWorkflowEdge({ source: "input", sourceHandle: "out", target: "disconnected" }));
+  assert.equal((await post("😀".repeat(s.MAX_QUESTION_CHARS / 2))).status, 202);
+  assert.equal(admissions, 2);
+  assert.equal(executions, 2);
 });

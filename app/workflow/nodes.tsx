@@ -16,6 +16,7 @@ import {
   Check,
   CircleDashed,
   FileOutput,
+  FileSpreadsheet,
   GitBranch,
   Globe,
   BookOpen,
@@ -53,6 +54,10 @@ import {
   JEV_MODELS,
   LLM_MODEL_GROUPS,
   LLM_MODELS,
+  MAX_CSV_ROWS,
+  MAX_CSV_COLUMNS,
+  MAX_CSV_FIELD_CHARS,
+  MAX_CSV_HEADER_CHARS,
   MAX_DATA_SOURCE_CHARS,
   MAX_TRANSFORM_FIELDS,
   TRUE_HANDLE,
@@ -67,6 +72,7 @@ import {
   truncate,
   type ActivationMode,
   type ConditionNode,
+  type CsvNode,
   type HttpNode,
   type ApprovalNode,
   type KnowledgeNode,
@@ -1179,6 +1185,102 @@ const TransformNodeView = memo(
   }
 );
 
+const CsvNodeView = memo(({ id, data, selected }: NodeProps<CsvNode>) => {
+  const { updateNodeData } = useReactFlow<WorkflowNode>();
+  const { results } = useRun();
+  const result = results.get(id);
+  const node: CsvNode = { id, type: "csv", position: { x: 0, y: 0 }, data };
+  const delimiterLabel = data.delimiter === "\t"
+    ? "Tab"
+    : data.delimiter === ";" ? "Semicolon" : "Comma";
+
+  return (
+    <NodeFrame
+      id={id}
+      node={node}
+      selected={selected}
+      icon={<FileSpreadsheet className="size-3.5" />}
+      accent="#0d9488"
+      result={result}
+      hasTarget
+      handles={getSourceHandles(node)}
+      summary={
+        <div className="flex flex-col gap-1.5">
+          <p className="text-xs text-neutral-500">CSV to JSON · no AI</p>
+          <p className="text-xs text-neutral-700">
+            {delimiterLabel} · {data.headers ? "First row headers" : "No headers"}
+          </p>
+          {result?.csv && result.status !== "skipped" ? (
+            <p className="text-xs font-medium text-neutral-700">
+              {result.csv.rowCount} {result.csv.rowCount === 1 ? "row" : "rows"} ·{" "}
+              {result.csv.columnCount} {result.csv.columnCount === 1 ? "column" : "columns"}
+            </p>
+          ) : null}
+          {result?.output !== undefined && result.status !== "skipped" ? (
+            <pre
+              aria-label="CSV JSON output preview"
+              className="max-h-24 overflow-hidden whitespace-pre-wrap break-all rounded bg-neutral-50 px-2 py-1 font-mono text-xs leading-relaxed text-neutral-700"
+            >
+              {truncate(result.output, 220)}
+            </pre>
+          ) : (
+            <p className="text-xs leading-relaxed text-neutral-500">
+              Connect CSV text from Input or HTTP. Outputs one JSON array.
+            </p>
+          )}
+        </div>
+      }
+      editor={
+        <>
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Delimiter</FieldLabel>
+            <Select
+              value={data.delimiter}
+              onChange={(event) =>
+                updateNodeData(id, { delimiter: event.target.value as CsvNode["data"]["delimiter"] })
+              }
+            >
+              <option value=",">Comma (,)</option>
+              <option value=";">Semicolon (;)</option>
+              <option value={"\t"}>Tab</option>
+            </Select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Headers</FieldLabel>
+            <Select
+              value={data.headers ? "headers" : "none"}
+              onChange={(event) => updateNodeData(id, { headers: event.target.value === "headers" })}
+            >
+              <option value="headers">First row headers</option>
+              <option value="none">No headers</option>
+            </Select>
+          </label>
+          <p className="text-[11px] leading-relaxed text-neutral-500">
+            Connect CSV text from Input or HTTP. First row headers produces an array of objects;
+            no headers produces an array of string arrays. All cells stay strings:{" "}
+            <code>00123</code> stays <code>&quot;00123&quot;</code>. No trimming or formula evaluation.
+          </p>
+          <p className="text-[11px] leading-relaxed text-neutral-500">
+            Empty lines are ignored, but whitespace-only lines are data. Quoted delimiters,
+            newlines and doubled quotes are supported. Every row must have the same column count.
+            Empty input returns <code>[]</code>; a header-only input also returns <code>[]</code>.
+          </p>
+          <p className="break-words text-[11px] leading-relaxed text-neutral-500">
+            Headers are preserved, including Unicode. They must be nonblank and unique;{" "}
+            <code>__proto__</code>, <code>constructor</code> and <code>prototype</code> are not allowed.
+          </p>
+          <p className="text-[11px] leading-relaxed text-neutral-500">
+            Limits: {MAX_CSV_ROWS} data rows, {MAX_CSV_COLUMNS} columns,{" "}
+            {MAX_CSV_FIELD_CHARS} UTF-16 units per cell and {MAX_CSV_HEADER_CHARS} per header.
+            Input and JSON output each allow 32,000 UTF-16 units.
+            Invalid or oversized CSV fails instead of truncating.
+          </p>
+        </>
+      }
+    />
+  );
+});
+
 /* -------------------------------------------------------------------------- */
 /*                              Connected nodes                               */
 /* -------------------------------------------------------------------------- */
@@ -1642,6 +1744,7 @@ export const nodeTypes: NodeTypes = {
   llm: LlmNodeView,
   condition: ConditionNodeView,
   transform: TransformNodeView,
+  csv: CsvNodeView,
   http: HttpNodeView,
   approval: ApprovalNodeView,
   knowledge: KnowledgeNodeView,
