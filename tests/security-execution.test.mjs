@@ -683,6 +683,71 @@ test("CSV arrays remain consumable by Transform without coercing identifiers", a
   });
 });
 
+test("CSV to Table computes exact grouped totals and persists counts without provider work", async () => {
+  let providerCalls = 0;
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    streamText: () => { providerCalls++; throw new Error("must not call"); },
+  });
+  const s = h.shared;
+  h.setGraph({
+    nodes: [
+      s.createInputNode({ position: { x: 0, y: 0 } }),
+      s.createCsvNode({ id: "csv", position: { x: 1, y: 0 } }),
+      s.createTableNode({
+        id: "table", position: { x: 2, y: 0 }, groupBy: "ภูมิภาค",
+        filters: [{ id: "paid", column: "status", operator: "eq", value: "paid" }],
+        aggregates: [
+          { id: "sum", operation: "sum", column: "ยอด.ขาย", name: "ยอดรวม" },
+          { id: "count", operation: "count", column: "", name: "จำนวน" },
+        ],
+      }),
+      s.createOutputNode({ position: { x: 3, y: 0 } }),
+    ],
+    edges: [["input", "csv"], ["csv", "table"], ["table", "output"]].map(([source, target]) =>
+      s.createWorkflowEdge({ source, sourceHandle: "out", target, targetHandle: target === "output" ? "customer" : "in" })),
+  });
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({
+    roomId: "private-room", input: "ภูมิภาค,ยอด.ขาย,status\nเหนือ,0.1,paid\nเหนือ,0.2,paid\nใต้,bad,cancelled\nใต้,1.25,paid", trigger: "test",
+  }).trace$;
+  assert.equal(trace.status, "complete", trace.error);
+  assert.deepEqual(JSON.parse(trace.output.customer[0]), [
+    { ภูมิภาค: "เหนือ", ยอดรวม: "0.3", จำนวน: 2 }, { ภูมิภาค: "ใต้", ยอดรวม: "1.25", จำนวน: 1 },
+  ]);
+  const persisted = h.events.findLast((entry) => entry.data?.nodeType === "table" && entry.data.status === "complete").data;
+  assert.deepEqual(persisted.table, { inputRows: 4, matchedRows: 3, outputRows: 2 });
+  assert.equal(persisted.output, trace.output.customer[0]);
+  assert.equal(providerCalls, 0);
+});
+
+test("invalid Table configuration prevents even an independent LLM branch from starting", async () => {
+  let providerCalls = 0;
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    streamText: () => { providerCalls++; throw new Error("must not call"); },
+  });
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const variants = [
+    { groupBy: "region", aggregates: [] },
+    { aggregates: [{ id: "sum", operation: "sum", column: "amount", name: "__proto__" }] },
+    { filters: [{ id: "filter", column: "amount", operator: "gte", value: "1e101" }] },
+  ];
+  for (const options of variants) {
+    const graph = fixtures(h.shared);
+    graph.nodes.push(h.shared.createTableNode({ id: "table", position: { x: 1, y: 1 }, ...options }));
+    graph.edges.push(
+      h.shared.createWorkflowEdge({ source: "input", sourceHandle: "out", target: "table" }),
+      h.shared.createWorkflowEdge({ source: "table", sourceHandle: "out", target: "output", targetHandle: "team" })
+    );
+    h.setGraph(graph);
+    const trace = await startWorkflowRun({ roomId: "private-room", input: "[]", trigger: "test" }).trace$;
+    assert.equal(trace.status, "error");
+    assert.equal(trace.nodes.some((node) => node.nodeType === "llm"), false);
+  }
+  assert.equal(providerCalls, 0);
+});
+
 test("run questions stay literal at the provider boundary without contaminating CSV or system text", async () => {
   const calls = [];
   const h = await harness({

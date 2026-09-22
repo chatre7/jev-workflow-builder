@@ -28,6 +28,7 @@ import {
   Plus,
   Rows3,
   Sparkles,
+  Table2,
   Trash2,
 } from "lucide-react";
 import {
@@ -60,10 +61,16 @@ import {
   MAX_CSV_HEADER_CHARS,
   MAX_DATA_SOURCE_CHARS,
   MAX_TRANSFORM_FIELDS,
+  MAX_TABLE_ROWS,
+  MAX_TABLE_COLUMNS,
+  MAX_TABLE_FILTERS,
+  MAX_TABLE_AGGREGATES,
   TRUE_HANDLE,
   createOutputProperty,
   createQuestion,
   createTransformField,
+  createTableFilter,
+  createTableAggregate,
   getActivation,
   getOutputProperties,
   getOutputPropertyId,
@@ -88,6 +95,8 @@ import {
   type QuestionType,
   type TransformField,
   type TransformNode,
+  type TableAggregate,
+  type TableNode,
   type WorkflowNode,
   type WorkflowEdge,
 } from "./shared";
@@ -1282,6 +1291,358 @@ const CsvNodeView = memo(({ id, data, selected }: NodeProps<CsvNode>) => {
 });
 
 /* -------------------------------------------------------------------------- */
+/*                                 Table node                                 */
+/* -------------------------------------------------------------------------- */
+
+function TableAggregateEditor({
+  aggregate,
+  aggregates,
+  groupBy,
+  onChange,
+  onRemove,
+}: {
+  aggregate: TableAggregate;
+  aggregates: TableAggregate[];
+  groupBy: string;
+  onChange: (changes: Partial<Pick<TableAggregate, "name" | "operation" | "column">>) => void;
+  onRemove: () => void;
+}) {
+  const [draft, setDraft] = useState(aggregate.name);
+  const [error, setError] = useState<string | null>(null);
+  const errorId = useId();
+
+  useEffect(() => setDraft(aggregate.name), [aggregate.name]);
+
+  function commit(name: string) {
+    let message: string | null = null;
+    if (!name.trim() || name.length > MAX_CSV_HEADER_CHARS) {
+      message = `Use a nonblank name of up to ${MAX_CSV_HEADER_CHARS} characters.`;
+    } else if (["__proto__", "constructor", "prototype"].includes(name)) {
+      message = "This name is reserved. Choose another name.";
+    } else if (name === groupBy) {
+      message = "Choose a name different from the Group by column.";
+    } else if (aggregates.some((entry) => entry.id !== aggregate.id && entry.name === name)) {
+      message = "This output name already exists. Choose a unique name.";
+    }
+    setError(message);
+    setDraft(message ? aggregate.name : name);
+    if (!message && name !== aggregate.name) onChange({ name });
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-end gap-1">
+        <label className="flex min-w-0 flex-1 flex-col gap-1">
+          <FieldLabel>Operation</FieldLabel>
+          <Select
+            aria-label={`Operation for ${aggregate.name}`}
+            value={aggregate.operation}
+            onChange={(event) => {
+              const operation = event.target.value as TableAggregate["operation"];
+              onChange({ operation, column: operation === "count" ? "" : aggregate.column });
+            }}
+          >
+            <option value="count">Count rows</option>
+            <option value="sum">Sum</option>
+          </Select>
+        </label>
+        <button
+          type="button"
+          className="icon-button nodrag shrink-0 hover:!text-red-600 focus-visible:outline-2 focus-visible:outline-violet-600"
+          aria-label={`Remove aggregate ${aggregate.name}`}
+          title="Remove aggregate"
+          onClick={onRemove}
+        >
+          <Trash2 className="size-3" />
+        </button>
+      </div>
+      {aggregate.operation === "sum" ? (
+        <label className="flex flex-col gap-1">
+          <FieldLabel>Sum column</FieldLabel>
+          <TextField
+            aria-label={`Sum column for ${aggregate.name}`}
+            value={aggregate.column}
+            maxLength={MAX_CSV_HEADER_CHARS}
+            placeholder="amount"
+            className="font-mono placeholder:!text-neutral-600"
+            onCommit={(column) => onChange({ column })}
+          />
+        </label>
+      ) : null}
+      <label className="flex flex-col gap-1">
+        <FieldLabel>Output name</FieldLabel>
+        <input
+          aria-label={`Output name: ${aggregate.name}`}
+          aria-invalid={Boolean(error)}
+          aria-describedby={error ? errorId : undefined}
+          value={draft}
+          maxLength={MAX_CSV_HEADER_CHARS}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setError(null);
+          }}
+          onBlur={(event) => commit(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              event.currentTarget.blur();
+            } else if (event.key === "Escape") {
+              setDraft(aggregate.name);
+              event.currentTarget.value = aggregate.name;
+              event.currentTarget.blur();
+            }
+          }}
+          spellCheck={false}
+          className="workflow-field nodrag nopan min-w-0 w-full rounded-md border border-neutral-200 bg-white px-2 py-1 font-mono text-xs text-neutral-900 focus:border-violet-400 focus:outline-none"
+        />
+      </label>
+      {error ? (
+        <p id={errorId} role="alert" className="text-[11px] text-red-700">{error}</p>
+      ) : null}
+    </div>
+  );
+}
+
+const TableNodeView = memo(({ id, data, selected }: NodeProps<TableNode>) => {
+  const { updateNodeData } = useReactFlow<WorkflowNode>();
+  const { results } = useRun();
+  const result = results.get(id);
+  const node: TableNode = { id, type: "table", position: { x: 0, y: 0 }, data };
+  const groupErrorId = useId();
+  const editorRef = useRef<HTMLDivElement>(null);
+  const focusAfterRemoval = useRef<"filter" | "aggregate" | null>(null);
+  useEffect(() => {
+    const target = focusAfterRemoval.current;
+    if (!target) return;
+    editorRef.current?.querySelector<HTMLButtonElement>(`[data-add-${target}]`)?.focus();
+    focusAfterRemoval.current = null;
+  }, [data.filters.length, data.aggregates.length]);
+  const groupError = data.aggregates.some((aggregate) => aggregate.name === data.groupBy)
+    ? "Group by cannot match an output name. Rename the output or choose another column."
+    : null;
+
+  function addAggregate() {
+    if (data.aggregates.length >= MAX_TABLE_AGGREGATES) return;
+    let index = 1;
+    while (
+      data.groupBy === `sum_${index}` ||
+      data.aggregates.some((aggregate) => aggregate.name === `sum_${index}`)
+    ) index++;
+    updateNodeData(id, {
+      aggregates: [...data.aggregates, createTableAggregate(index)],
+    });
+  }
+
+  return (
+    <NodeFrame
+      id={id}
+      node={node}
+      selected={selected}
+      icon={<Table2 className="size-3.5" />}
+      accent="#0d9488"
+      result={result}
+      hasTarget
+      handles={getSourceHandles(node)}
+      summary={
+        <div className="flex flex-col gap-1.5">
+          <p className="text-xs text-neutral-600">Filter and calculate · no AI</p>
+          <p className="break-words text-xs text-neutral-700">
+            {data.filters.length ? `${data.filters.length} filters · all must match` : "All rows · no filters"}
+            {" · "}
+            {data.aggregates.length === 0
+              ? "Filter-only output"
+              : data.groupBy ? `Group by ${truncate(data.groupBy, 40)}` : "One total"}
+          </p>
+          {result?.table && result.status !== "skipped" ? (
+            <p className="text-xs font-medium text-neutral-700">
+              Rows: {result.table.inputRows} input · {result.table.matchedRows} matched · {result.table.outputRows} output
+            </p>
+          ) : null}
+          {result?.output !== undefined && result.status !== "skipped" ? (
+            <pre
+              aria-label="Table JSON output preview"
+              className="max-h-24 overflow-hidden whitespace-pre-wrap break-all rounded bg-neutral-50 px-2 py-1 font-mono text-xs leading-relaxed text-neutral-700"
+            >
+              {truncate(result.output, 220)}
+            </pre>
+          ) : (
+            <ul className="space-y-1 text-xs text-neutral-700">
+              {data.filters.map((filter) => (
+                <li key={filter.id} className="break-words">
+                  <code>{truncate(filter.column, 32) || "(choose column)"}</code>{" "}
+                  {CONDITION_OPERATORS.find((operator) => operator.id === filter.operator)?.label.toLowerCase()}{" "}
+                  <code>{filter.value === "" ? '""' : truncate(filter.value, 32)}</code>
+                </li>
+              ))}
+              {data.aggregates.map((aggregate) => (
+                <li key={aggregate.id} className="break-words">
+                  <code>{truncate(aggregate.name, 32)}</code>:{" "}
+                  {aggregate.operation === "count" ? "Count rows" : `Sum ${truncate(aggregate.column, 40) || "(choose column)"}`}
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="text-[11px] leading-relaxed text-neutral-600">
+            Use CSV with headers ON. Exact sums are decimal strings.
+          </p>
+        </div>
+      }
+      editor={
+        <div ref={editorRef} data-table-editor className="nowheel flex max-h-[60vh] flex-col gap-3 overflow-y-auto">
+          <p className="text-[11px] leading-relaxed text-neutral-600">
+            Connect CSV with headers ON: one JSON array of flat rows. Column names are
+            literal, including spaces, dots and Thai; no paths or templates.
+          </p>
+          <section className="flex flex-col gap-2" aria-label="Table filters">
+            <FieldLabel>Filters</FieldLabel>
+            <p className="text-[11px] leading-relaxed text-neutral-600">
+              All filters must match (AND). No filters keeps all rows. Text matches
+              are case-sensitive, without trimming; numeric comparisons use exact decimals.
+            </p>
+            <div className="flex flex-col gap-3">
+              {data.filters.map((filter, index) => (
+                <div key={filter.id} className="flex flex-col gap-1.5">
+                  <div className="flex items-end gap-1">
+                    <label className="flex min-w-0 flex-1 flex-col gap-1">
+                      <FieldLabel>{`Filter ${index + 1} column`}</FieldLabel>
+                      <TextField
+                        value={filter.column}
+                        maxLength={MAX_CSV_HEADER_CHARS}
+                        placeholder="region"
+                        className="font-mono placeholder:!text-neutral-600"
+                        onCommit={(column) => updateNodeData(id, {
+                          filters: data.filters.map((entry) => entry.id === filter.id ? { ...entry, column } : entry),
+                        })}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="icon-button nodrag shrink-0 hover:!text-red-600 focus-visible:outline-2 focus-visible:outline-violet-600"
+                      aria-label={`Remove filter ${index + 1}`}
+                      title="Remove filter"
+                      onClick={() => {
+                        focusAfterRemoval.current = "filter";
+                        updateNodeData(id, { filters: data.filters.filter((entry) => entry.id !== filter.id) });
+                      }}
+                    >
+                      <Trash2 className="size-3" />
+                    </button>
+                  </div>
+                  <label className="flex flex-col gap-1">
+                    <FieldLabel>Operator</FieldLabel>
+                    <Select
+                      aria-label={`Operator for filter ${index + 1}`}
+                      value={filter.operator}
+                      onChange={(event) => updateNodeData(id, {
+                        filters: data.filters.map((entry) => entry.id === filter.id
+                          ? { ...entry, operator: event.target.value as ConditionOperator } : entry),
+                      })}
+                    >
+                      {CONDITION_OPERATORS.map((operator) => (
+                        <option key={operator.id} value={operator.id}>{operator.label}</option>
+                      ))}
+                    </Select>
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <FieldLabel>Value</FieldLabel>
+                    <TextField
+                      aria-label={`Value for filter ${index + 1}`}
+                      value={filter.value}
+                      maxLength={MAX_CSV_FIELD_CHARS}
+                      placeholder="Value to compare"
+                      className="placeholder:!text-neutral-600"
+                      onCommit={(value) => updateNodeData(id, {
+                        filters: data.filters.map((entry) => entry.id === filter.id ? { ...entry, value } : entry),
+                      })}
+                    />
+                  </label>
+                </div>
+              ))}
+            </div>
+            <button
+              data-add-filter
+              type="button"
+              disabled={data.filters.length >= MAX_TABLE_FILTERS}
+              className="nodrag flex min-h-7 items-center justify-center gap-1 rounded-md border border-dashed border-neutral-200 px-2 py-1 text-[11px] text-neutral-600 hover:border-neutral-300 hover:text-neutral-800 focus-visible:outline-2 focus-visible:outline-violet-600 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => {
+                if (data.filters.length >= MAX_TABLE_FILTERS) return;
+                updateNodeData(id, { filters: [...data.filters, createTableFilter()] });
+              }}
+            >
+              <Plus className="size-3" /> Add filter ({data.filters.length}/{MAX_TABLE_FILTERS})
+            </button>
+          </section>
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Group by (optional)</FieldLabel>
+            <TextField
+              value={data.groupBy}
+              disabled={data.aggregates.length === 0}
+              maxLength={MAX_CSV_HEADER_CHARS}
+              placeholder="No grouping"
+              className="font-mono placeholder:!text-neutral-600 disabled:bg-neutral-50"
+              aria-invalid={Boolean(groupError)}
+              aria-describedby={groupError ? groupErrorId : undefined}
+              onCommit={(groupBy) => updateNodeData(id, { groupBy })}
+            />
+          </label>
+          {groupError ? (
+            <p id={groupErrorId} role="alert" className="text-[11px] text-red-700">{groupError}</p>
+          ) : null}
+          <section className="flex flex-col gap-2" aria-label="Table aggregates">
+            <FieldLabel>Aggregates</FieldLabel>
+            <div className="flex flex-col gap-3">
+              {data.aggregates.map((aggregate) => (
+                <TableAggregateEditor
+                  key={aggregate.id}
+                  aggregate={aggregate}
+                  aggregates={data.aggregates}
+                  groupBy={data.groupBy}
+                  onChange={(changes) => updateNodeData(id, {
+                    aggregates: data.aggregates.map((entry) => entry.id === aggregate.id ? { ...entry, ...changes } : entry),
+                  })}
+                  onRemove={() => {
+                    focusAfterRemoval.current = "aggregate";
+                    const aggregates = data.aggregates.filter((entry) => entry.id !== aggregate.id);
+                    updateNodeData(id, {
+                      aggregates,
+                      groupBy: aggregates.length ? data.groupBy : "",
+                    });
+                  }}
+                />
+              ))}
+            </div>
+            <button
+              data-add-aggregate
+              type="button"
+              onClick={addAggregate}
+              disabled={data.aggregates.length >= MAX_TABLE_AGGREGATES}
+              className="nodrag flex min-h-7 items-center justify-center gap-1 rounded-md border border-dashed border-neutral-200 px-2 py-1 text-[11px] text-neutral-600 hover:border-neutral-300 hover:text-neutral-800 focus-visible:outline-2 focus-visible:outline-violet-600 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Plus className="size-3" /> Add aggregate ({data.aggregates.length}/{MAX_TABLE_AGGREGATES})
+            </button>
+            <p className="text-[11px] leading-relaxed text-neutral-600">
+              {data.aggregates.length === 0
+                ? "Filter-only output: matching rows keep their fields, types and order. Add an aggregate to enable grouping."
+                : "Count counts matching rows. Use unique output names, different from the Group by column. Remove all aggregates for filter-only output."}
+            </p>
+          </section>
+          <p className="text-[11px] leading-relaxed text-neutral-600">
+            Sums are exact decimal strings, not rounded numbers. Missing columns or
+            invalid numeric values fail the run, never become silent zeros.
+            Sum requires a number in every matched row; blanks, nulls, booleans,
+            currency symbols and separators are not numbers.
+          </p>
+          <p className="text-[11px] leading-relaxed text-neutral-600">
+            Limits: {MAX_TABLE_ROWS} rows, {MAX_TABLE_COLUMNS} columns and 32,000
+            characters each for input and output. Oversized data fails, never truncates.
+          </p>
+        </div>
+      }
+    />
+  );
+});
+
+/* -------------------------------------------------------------------------- */
 /*                              Connected nodes                               */
 /* -------------------------------------------------------------------------- */
 
@@ -1745,6 +2106,7 @@ export const nodeTypes: NodeTypes = {
   condition: ConditionNodeView,
   transform: TransformNodeView,
   csv: CsvNodeView,
+  table: TableNodeView,
   http: HttpNodeView,
   approval: ApprovalNodeView,
   knowledge: KnowledgeNodeView,

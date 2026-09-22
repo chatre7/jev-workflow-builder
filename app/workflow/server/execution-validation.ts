@@ -30,6 +30,7 @@ import {
   jsonSize,
 } from "./execution-policy";
 import { validateConditionOperands, validateDataSource } from "./data-nodes";
+import { validateTableConfig } from "./table";
 
 export const MAX_GRAPH_STORAGE_CHARS = 512_000;
 const RESERVED_KEYS: Record<string, boolean> = { ["__proto__"]: true, constructor: true, prototype: true };
@@ -209,6 +210,9 @@ export function validateWorkflowGraph(value: unknown): ValidatedWorkflowGraph {
         if (typeof node.data.headers !== "boolean") {
           throw new ExecutionError("CSV requires an explicit header mode.");
         }
+        break;
+      case "table":
+        validateTableConfig(node.data);
         break;
       default:
         throw new ExecutionError("Workflow contains an unsupported node type.");

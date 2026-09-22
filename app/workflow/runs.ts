@@ -88,6 +88,7 @@ export type NodeResultData = {
   httpStatus?: number;
   approval?: ApprovalDetails;
   csv?: { rowCount: number; columnCount: number; headers: boolean };
+  table?: { inputRows: number; matchedRows: number; outputRows: number };
   durationMs?: number;
   error?: string;
   startedAt: number;

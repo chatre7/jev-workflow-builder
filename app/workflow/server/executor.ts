@@ -25,6 +25,7 @@ import {
   MAX_CSV_ROWS,
   MAX_CSV_COLUMNS,
   MAX_INPUT_CHARS,
+  MAX_TABLE_ROWS,
   MAX_QUESTION_CHARS,
   getActivation,
   getOutputProperties,
@@ -68,6 +69,7 @@ import { askJev, toTypeSafeQuestions, type JevState } from "./typesafe";
 import { runHttpRequest } from "./http";
 import { searchKnowledge } from "./knowledge";
 import { convertCsv } from "./csv";
+import { calculateTable } from "./table";
 import {
   finishApprovalRun,
   saveApprovalCheckpoint,
@@ -375,6 +377,27 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
           await writeMessage({
             ...base, status: "complete", output: result.text, firedHandles: [OUT_HANDLE],
             csv: { rowCount: result.rowCount, columnCount: result.columnCount, headers: node.data.headers },
+            durationMs: Date.now() - nodeStartedAt,
+          });
+          return { output: result.text, answers, firedHandles: new Set([OUT_HANDLE]) };
+        }
+        if (node.type === "table") {
+          // Include every result field in the reservation before Table serializes its output.
+          const outputBaseSize = jsonSize({
+            ...base, status: "complete", output: "", firedHandles: [OUT_HANDLE],
+            table: { inputRows: MAX_TABLE_ROWS, matchedRows: MAX_TABLE_ROWS, outputRows: MAX_TABLE_ROWS },
+            durationMs: RUN_TIMEOUT_MS,
+          }, MAX_NODE_TRACE_CHARS, "Node trace");
+          const result = calculateTable(node.data, nodeInput, (textSize, serializedSize) => {
+            active();
+            budget.text(textSize);
+            const size = outputBaseSize + serializedSize - 2;
+            checkLimit(size, MAX_NODE_TRACE_CHARS, "Node trace");
+            checkLimit(traceSize - (messageSizes.get(node.id) ?? 0) + size, MAX_RUN_TRACE_CHARS, "Run trace");
+          });
+          await writeMessage({
+            ...base, status: "complete", output: result.text, firedHandles: [OUT_HANDLE],
+            table: { inputRows: result.inputRows, matchedRows: result.matchedRows, outputRows: result.outputRows },
             durationMs: Date.now() - nodeStartedAt,
           });
           return { output: result.text, answers, firedHandles: new Set([OUT_HANDLE]) };

@@ -26,6 +26,7 @@ import {
   History,
   Route,
   Rows3,
+  Table2,
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -102,6 +103,8 @@ function NodeTypeIcon({ type }: { type: WorkflowNodeType }) {
       return <Rows3 className="size-3.5 text-teal-600" />;
     case "csv":
       return <FileSpreadsheet className="size-3.5 text-teal-600" />;
+    case "table":
+      return <Table2 className="size-3.5 text-teal-600" />;
     case "http":
       return <Globe className="size-3.5 text-sky-600" />;
     case "approval":
@@ -463,7 +466,7 @@ function TraceNode({
           </div>
         ) : null}
 
-        {(message.nodeType === "transform" || message.nodeType === "csv") &&
+        {(message.nodeType === "transform" || message.nodeType === "csv" || message.nodeType === "table") &&
         message.output !== undefined &&
         message.status !== "skipped" ? (
           <div className="border-t border-neutral-100 px-2.5 py-1.5">
@@ -475,6 +478,11 @@ function TraceNode({
                 {message.csv.rowCount} {message.csv.rowCount === 1 ? "row" : "rows"} ·{" "}
                 {message.csv.columnCount} {message.csv.columnCount === 1 ? "column" : "columns"} ·{" "}
                 {message.csv.headers ? "First row headers" : "No headers"}
+              </p>
+            ) : null}
+            {message.nodeType === "table" && message.table ? (
+              <p className="mb-1 text-xs font-medium text-neutral-700">
+                Rows: {message.table.inputRows} input · {message.table.matchedRows} matched · {message.table.outputRows} output
               </p>
             ) : null}
             <pre

@@ -131,8 +131,9 @@ Use **System** to request the answer language, preserve identifier strings,
 and instruct the model to treat table cells as data rather than instructions
 and acknowledge missing information. Real answers require the configured
 OpenRouter key; model availability, application quotas, and size limits still
-apply. Verify important arithmetic independently rather than treating an LLM
-answer as an accounting calculation.
+apply. For sums and counts, put a **Table** node before the LLM so code computes
+the values and the model only explains them. Keep the Table output separately
+when authoritative numbers matter; LLM prose is not an accounting calculation.
 
 The **CSV file** picker appears when a CSV node receives its input directly from
 Input, with no other incoming source. Files must be valid UTF-8 and fit the
@@ -173,6 +174,65 @@ Repeated headers and JSON escaping count toward output size. Malformed quoting,
 inconsistent widths, NUL characters, ill-formed Unicode, and over-limit data
 fail rather than being repaired or truncated. The canvas and execution trace
 show the JSON output, data-row count, column count, and header mode.
+
+### Table: Filter, Group by, Sum and Count
+
+Connect `Input → CSV → Table → LLM → Output`, with CSV **First row headers**
+enabled. Table consumes one JSON array of flat objects, not headerless arrays or
+LLM prose. It runs without an AI provider call; starting the workflow still uses
+the unchanged run/admission quota.
+
+Add **Table** from the toolbar:
+
+1. Add up to **8 filters**. Every filter must match (AND); no filters keeps all
+   rows. Equals, does not equal and contains compare `String(cell)` literally,
+   case-sensitively and without trimming. Numeric ordering uses exact decimals.
+2. Optionally set **Group by** to one column, such as `customer`. Leave it empty
+   for one aggregate across all matching rows. Groups retain the original value
+   and type in first-seen order: string `"1"` and number `1` are different groups.
+3. Configure up to **8 aggregates**. **Count rows** counts matching rows.
+   **Sum** requires a numeric column. Give each metric a unique output name,
+   such as `orders` or `total`, different from the grouping column.
+4. Remove every aggregate for **filter-only output**. Grouping clears, and
+   matching rows retain their original fields, cell types and order.
+
+Column names are literal, including Thai, spaces and dots—not paths, templates,
+SQL or JavaScript. Every configured column must exist in every input row, even
+one that a filter would exclude. Names must be nonblank; reserved prototype keys
+(`__proto__`, `constructor`, `prototype`) are rejected.
+
+For example, filter `status Equals paid`, group by `customer`, Sum `amount` as
+`total`, and Count rows as `orders`. Two matching amounts `"0.10"` and `"0.20"`
+produce:
+
+```json
+[{"customer":"สมชาย","total":"0.3","orders":2}]
+```
+
+Sums use bounded integer coefficient/scale arithmetic and return **canonical
+decimal strings**, without binary floating-point addition or implicit currency
+rounding. Counts are JSON numbers. Decimal strings accept signs and exponent
+notation, with at most **100 coefficient digits** and exponent magnitude **100**.
+Blanks, surrounding whitespace, null, booleans, currency symbols, thousands
+separators, hexadecimal and non-finite values are not numeric operands. Invalid
+numeric comparisons or matched-row sums fail; excluded rows' sum cells are not
+evaluated. JSON numeric cells must be finite and within `Number.MAX_SAFE_INTEGER`
+in magnitude; use strings (as CSV already does) to preserve exact source precision.
+
+With no matches, an ungrouped aggregate returns one row of zero metrics; grouped
+and filter-only operations return `[]`. All input rows are checked for shape,
+cell bounds and configured-column presence before filtering. Limits are **500
+rows**, **64 columns per row**, **128 UTF-16 units per column/output name** and
+**8,000 per string cell**. Nested objects/arrays are rejected. Input and output
+each allow **32,000 UTF-16 units**, with existing cumulative text/trace budgets.
+Over-limit input/output fails rather than truncating. Canvas and trace show input,
+matched and output row counts.
+
+Send Table's JSON to a separate named Output property as well as to the LLM when
+you need both exact results and a narrative. Tell the model to preserve the
+provided values, not recalculate them. Per-run questions do not change the saved
+filters, grouping or aggregates; removed source columns are not available to the
+downstream model.
 
 ### HTTP Request
 
@@ -373,7 +433,8 @@ with isolated external services. They cover authorization, workspace isolation,
 request bounds, graph amplification, provider cancellation, deadlines, HTTP SSRF
 and credential handling, lexical retrieval, approval resume/replay boundaries,
 CSV quoting, Unicode, row/column bounds, JSON-size amplification, preview access
-and full-data validation, and literal questions across approval resumes.
+and full-data validation, literal questions across approval resumes, and exact
+Table arithmetic, typed grouping, filtering and output-budget boundaries.
 
 The separate Redis integration suite executes the actual Lua admission and
 approval claim/fencing scripts against an ephemeral local Redis container:

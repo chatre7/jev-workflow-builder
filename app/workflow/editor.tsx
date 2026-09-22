@@ -44,6 +44,7 @@ import {
   Redo2,
   Rows3,
   Sparkles,
+  Table2,
   Undo2,
   X,
 } from "lucide-react";
@@ -71,6 +72,7 @@ import {
   createLlmNode,
   createOutputNode,
   createTransformNode,
+  createTableNode,
   createWorkflowEdge,
   getReachableNodeIds,
   getOutputPropertyId,
@@ -361,6 +363,9 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
         case "csv":
           item = createCsvNode(args);
           break;
+        case "table":
+          item = createTableNode(args);
+          break;
         case "http":
           item = createHttpNode(args);
           break;
@@ -508,6 +513,16 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
                 <FileSpreadsheet className="size-4" />
               </span>{" "}
               CSV
+            </button>
+            <button
+              type="button"
+              onClick={() => addNode("table")}
+              className="toolbar-button hover:bg-teal-50 hover:text-teal-700"
+            >
+              <span className="toolbar-icon bg-teal-50 text-teal-600">
+                <Table2 className="size-4" />
+              </span>{" "}
+              Table
             </button>
             <button
               type="button"

@@ -36,6 +36,11 @@ export const MAX_CSV_ROWS = 500;
 export const MAX_CSV_COLUMNS = 64;
 export const MAX_CSV_FIELD_CHARS = 8_000;
 export const MAX_CSV_HEADER_CHARS = 128;
+export const MAX_TABLE_ROWS = 500;
+export const MAX_TABLE_COLUMNS = 64;
+export const MAX_TABLE_FILTERS = 8;
+export const MAX_TABLE_AGGREGATES = 8;
+export const MAX_TABLE_DECIMAL_DIGITS = 100;
 // Run text limits count UTF-16 code units.
 export const MAX_INPUT_CHARS = 20_000;
 export const MAX_QUESTION_CHARS = 4_000;
@@ -224,6 +229,30 @@ export type CsvNodeData = {
   activation?: ActivationMode;
 };
 
+export type TableFilter = {
+  id: string;
+  column: string;
+  operator: ConditionOperator;
+  value: string;
+};
+
+export type TableAggregate = {
+  id: string;
+  operation: "sum" | "count";
+  column: string;
+  name: string;
+};
+
+export type TableNodeData = {
+  label: string;
+  filters: TableFilter[];
+  // A literal column name; empty means one aggregate over all matching rows.
+  groupBy: string;
+  // Empty means return matching rows without aggregation.
+  aggregates: TableAggregate[];
+  activation?: ActivationMode;
+};
+
 /**
  * Unique sink, like the input node. Collects parent texts into named output
  * properties, according to the connected target handle.
@@ -281,6 +310,7 @@ export type HttpNode = Node<HttpNodeData, "http">;
 export type ApprovalNode = Node<ApprovalNodeData, "approval">;
 export type KnowledgeNode = Node<KnowledgeNodeData, "knowledge">;
 export type CsvNode = Node<CsvNodeData, "csv">;
+export type TableNode = Node<TableNodeData, "table">;
 export type OutputNode = Node<OutputNodeData, "output">;
 export type WorkflowNode =
   | InputNode
@@ -292,6 +322,7 @@ export type WorkflowNode =
   | ApprovalNode
   | KnowledgeNode
   | CsvNode
+  | TableNode
   | OutputNode;
 export type WorkflowNodeType = WorkflowNode["type"];
 
@@ -359,6 +390,7 @@ export function getSourceHandles(node: WorkflowNode): HandleDef[] {
     case "http":
     case "knowledge":
     case "csv":
+    case "table":
       return [{ id: OUT_HANDLE, label: "output", title: "Output text" }];
     case "jev":
       return [
@@ -652,6 +684,42 @@ export function createCsvNode(args: {
       label: args.label ?? "CSV → JSON",
       delimiter: args.delimiter ?? ",",
       headers: args.headers ?? true,
+      activation: args.activation ?? "any",
+    },
+  };
+}
+
+export function createTableFilter(): TableFilter {
+  return { id: `filter-${nanoid(6)}`, column: "", operator: "eq", value: "" };
+}
+
+export function createTableAggregate(
+  index: number,
+  operation: TableAggregate["operation"] = "sum"
+): TableAggregate {
+  return { id: `aggregate-${nanoid(6)}`, operation, column: "", name: `${operation}_${index}` };
+}
+
+export function createTableNode(args: {
+  id?: string;
+  position: Point;
+  label?: string;
+  filters?: TableFilter[];
+  groupBy?: string;
+  aggregates?: TableAggregate[];
+  activation?: ActivationMode;
+  selected?: boolean;
+}): TableNode {
+  return {
+    id: args.id ?? `table-${nanoid(8)}`,
+    type: "table",
+    position: args.position,
+    selected: args.selected,
+    data: {
+      label: args.label ?? "Table",
+      filters: args.filters ?? [],
+      groupBy: args.groupBy ?? "",
+      aggregates: args.aggregates ?? [createTableAggregate(1, "count")],
       activation: args.activation ?? "any",
     },
   };
