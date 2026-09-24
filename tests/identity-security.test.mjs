@@ -34,6 +34,16 @@ test("owner sign-in rejects wrong passwords, forged updates and obsolete session
   assert.equal(user.id, "owner");
   claims = await options.callbacks.jwt({ token: {}, account: { provider: "credentials" }, user });
   assert.equal((await auth.getPrincipal()).id, "owner");
+  // Refreshing the JWT keeps the original sign-in time; sessions end 8h after sign-in.
+  const signedIn = claims;
+  claims = await options.callbacks.jwt({ token: { ...signedIn } });
+  assert.equal(claims.authTime, signedIn.authTime);
+  claims = { ...signedIn, authTime: signedIn.authTime - 8 * 60 * 60 };
+  assert.equal(await auth.getPrincipal(), null);
+  claims = { ...signedIn };
+  delete claims.authTime;
+  assert.equal(await auth.getPrincipal(), null);
+  claims = signedIn;
   env.OWNER_PASSWORD = "a-different-long-owner-password";
   assert.equal(await auth.getPrincipal(), null);
   env.OWNER_PASSWORD = "";

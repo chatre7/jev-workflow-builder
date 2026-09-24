@@ -378,7 +378,17 @@ test("missing publication fence cannot authorize a durable but unconfirmed check
   const h = await routeHarness();
   h.setFeed({ status: "waiting" });
   assert.equal((await h.post()).status, 410);
+  assert.equal(h.calls.admissions, 0);
   assert.equal(h.calls.claims, 0);
   assert.equal(h.calls.resumes, 0);
-  assert.equal(h.calls.releases, 1);
+});
+
+test("stale approvals are rejected before admission reserves quota", async () => {
+  for (const status of ["running", "complete", "error"]) {
+    const h = await routeHarness();
+    h.setFeed({ status, approvalToken: "published-approval-token-for-tests" });
+    assert.equal((await h.post()).status, 409);
+    assert.equal(h.calls.admissions, 0);
+    assert.equal(h.calls.claims, 0);
+  }
 });

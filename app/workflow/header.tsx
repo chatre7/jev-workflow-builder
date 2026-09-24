@@ -4,7 +4,7 @@ import { AvatarStack } from "@liveblocks/react-ui";
 import { ChevronRight, Plus, Workflow } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { HelpButton } from "../../components/help-button";
 import { createWorkflowAction, renameWorkflowAction } from "./actions";
 import type { WorkflowSummary } from "./server/liveblocks";
@@ -17,12 +17,18 @@ export function WorkflowHeader({
   const router = useRouter();
   const [name, setName] = useState(workflow.name);
   const [isPending, startTransition] = useTransition();
+  // Escape blurs before React re-renders, so blur would otherwise save the edit.
+  const cancelled = useRef(false);
 
   useEffect(() => {
     setName(workflow.name);
   }, [workflow.name]);
 
   function commitName() {
+    if (cancelled.current) {
+      cancelled.current = false;
+      return;
+    }
     const next = name.trim() || "Untitled workflow";
     setName(next);
 
@@ -31,7 +37,12 @@ export function WorkflowHeader({
     }
 
     startTransition(async () => {
-      await renameWorkflowAction(workflow.workflowId, next);
+      try {
+        await renameWorkflowAction(workflow.workflowId, next);
+      } catch {
+        setName(workflow.name);
+        return;
+      }
       router.refresh();
     });
   }
@@ -72,6 +83,7 @@ export function WorkflowHeader({
             if (event.key === "Enter") {
               event.currentTarget.blur();
             } else if (event.key === "Escape") {
+              cancelled.current = true;
               setName(workflow.name);
               event.currentTarget.blur();
             }

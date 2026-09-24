@@ -10,7 +10,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-vm-modules --test tests/*.test.mjs",
     "test:redis": "node --experimental-vm-modules --test tests/*.integration.mjs"
@@ -38,6 +38,8 @@
     "@types/node": "^22.20.4",
     "@types/react": "^18.0.38",
     "@types/react-dom": "^18.0.11",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.3.5",
     "postcss": "^8.4.49",
     "tailwindcss": "^4.1.18",
     "typescript": "^5.2.2"

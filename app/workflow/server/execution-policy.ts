@@ -194,6 +194,15 @@ export class RunBudget {
     checkLimit(this.feed + size, MAX_RUN_FEED_CHARS - MAX_RUN_TRACE_CHARS - 4_096, "Run feed writes");
     this.feed += size;
   }
+
+  /**
+   * Streaming previews are optional. Each one rewrites the whole node message,
+   * so stop previewing (instead of failing the run) before previews consume the
+   * room later nodes need for their own messages.
+   */
+  hasStreamFeedRoom(size: number): boolean {
+    return this.feed + size <= MAX_RUN_FEED_CHARS - 2 * MAX_RUN_TRACE_CHARS - 4_096;
+  }
 }
 
 export function boundedJoin(texts: readonly string[], budget: RunBudget, reserveTrace?: (serializedSize: number) => void): string {

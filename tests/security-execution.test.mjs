@@ -169,6 +169,51 @@ test("template substitution is preflighted and prompt budgets are cumulative", a
   assert.throws(() => boundedTemplates(["extra"], context, budget), /Run prompts/);
 });
 
+test("templates read only own answer fields", async () => {
+  const h = await harness();
+  const { renderTemplate } = await h.load("app/workflow/shared");
+  const answers = { risk: { value: "high", probability: 0.25, confidence: 0.5 } };
+  const render = (template) => renderTemplate(template, { input: "in", answers });
+  assert.equal(render("{{answers.risk}}|{{answers.risk.probability}}|{{answers.risk.confidence}}"), "high|0.25|0.50");
+  assert.equal(render("[{{answers.constructor}}][{{answers.toString.probability}}][{{answers.risk.unknown}}]"), "[][][]");
+});
+
+test("streaming previews stop before they consume the feed reserve", async () => {
+  const h = await harness();
+  const { RunBudget, MAX_RUN_FEED_CHARS, MAX_RUN_TRACE_CHARS } = await h.load("app/workflow/server/execution-policy");
+  const budget = new RunBudget();
+  const room = MAX_RUN_FEED_CHARS - 2 * MAX_RUN_TRACE_CHARS - 4_096;
+  assert.equal(budget.hasStreamFeedRoom(room), true);
+  assert.equal(budget.hasStreamFeedRoom(room + 1), false);
+  budget.feedWrite(room);
+  assert.equal(budget.hasStreamFeedRoom(1), false);
+  // Regular writes may still use the space previews leave for later nodes.
+  budget.feedWrite(MAX_RUN_TRACE_CHARS);
+});
+
+test("numeric conditions compare decimal text exactly", async () => {
+  const h = await harness();
+  const { evaluateCondition } = await h.load("app/workflow/server/data-nodes");
+  const check = (source, operator, value) => evaluateCondition(
+    { source: "json.n", operator, value }, { input: JSON.stringify({ n: source }), answers: {}, parents: {} },
+  );
+  assert.equal(check("9007199254740993", "gt", "9007199254740992"), true);
+  assert.equal(check("0.30000000000000001", "gt", "0.3"), true);
+  assert.equal(check("-0.30000000000000001", "lt", "-0.3"), true);
+  assert.equal(check("1.50", "gte", "1.5"), true);
+  assert.equal(check("1.50", "lte", "15e-1"), true);
+  assert.equal(check(".05", "lt", "0.5"), true);
+  assert.equal(check("-0", "gte", "0"), true);
+  assert.equal(check("-2", "lt", "-1"), true);
+  assert.equal(check("0.001", "gt", "-1000"), true);
+  assert.equal(check(1e21, "gt", "999999999999999999999"), true);
+  assert.equal(check(0.1, "eq", "0.100"), true);
+  assert.equal(check(0.1, "ne", "0.1000000000000000055511151231257827"), true);
+  assert.throws(() => check("1e400", "gt", "0"), /finite decimal/);
+  assert.throws(() => check("0x10", "gt", "0"), /finite decimal/);
+  assert.throws(() => check(" 1", "gt", "0"), /finite decimal/);
+});
+
 test("JSON trace preflight counts escaping and rejects without serializing", async () => {
   const h = await harness();
   const { jsonSize } = await h.load("app/workflow/server/execution-policy");

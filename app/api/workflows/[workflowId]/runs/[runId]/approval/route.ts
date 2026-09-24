@@ -10,6 +10,19 @@ import { boundedOperation, STORAGE_TIMEOUT_MS } from "../../../../../../workflow
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
+async function readApprovalToken(roomId: string, runId: string): Promise<string> {
+  const feed = await boundedOperation(
+    (signal) => getLiveblocks().getFeed({ roomId, feedId: runId }, { signal }),
+    STORAGE_TIMEOUT_MS
+  );
+  if (feed.metadata.status !== "waiting") throw new ApiError(409, "This run is no longer waiting for approval.");
+  const expectedToken = feed.metadata.approvalToken;
+  if (typeof expectedToken !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(expectedToken)) {
+    throw new ApiError(410, "This approval checkpoint is unavailable.");
+  }
+  return expectedToken;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ workflowId: string; runId: string }> }
@@ -33,6 +46,9 @@ export async function POST(
     const workflow = await getWorkflow(workflowId, principal);
     if (!workflow) throw new ApiError(404, "Workflow not found.");
     const roomId = getRoomId(workflowId);
+    // Admission consumes daily quota, so reject stale approvals (double clicks,
+    // finished or expired runs) before reserving it. Rechecked under the lease.
+    await readApprovalToken(roomId, runId);
     let lease;
     try {
       lease = await acquireRunLease(principal.id, roomId);
@@ -44,15 +60,7 @@ export async function POST(
     }
     let run;
     try {
-      const feed = await boundedOperation(
-        (signal) => getLiveblocks().getFeed({ roomId, feedId: runId }, { signal }),
-        STORAGE_TIMEOUT_MS
-      );
-      if (feed.metadata.status !== "waiting") throw new ApiError(409, "This run is no longer waiting for approval.");
-      const expectedToken = feed.metadata.approvalToken;
-      if (typeof expectedToken !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(expectedToken)) {
-        throw new ApiError(410, "This approval checkpoint is unavailable.");
-      }
+      const expectedToken = await readApprovalToken(roomId, runId);
       const claim = await claimApproval({
         roomId, runId, nodeId: body.nodeId, decision: body.decision, actorId: principal.id, expectedToken,
       });
