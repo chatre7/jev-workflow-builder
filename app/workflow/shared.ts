@@ -906,7 +906,8 @@ export function renderTemplate(
       return "";
     }
 
-    const answer = context.answers[id];
+    // Own keys only: `answers.constructor` must not reach Object.prototype.
+    const answer = Object.hasOwn(context.answers, id) ? context.answers[id] : undefined;
 
     if (!answer) {
       return "";
@@ -920,7 +921,7 @@ export function renderTemplate(
       return answer.confidence.toFixed(2);
     }
 
-    return answer.value;
+    return field === undefined ? answer.value : "";
   });
 }
 

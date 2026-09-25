@@ -473,8 +473,10 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
               active();
               if (Date.now() - lastWrite < STREAM_THROTTLE_MS) return;
               lastWrite = Date.now();
+              const preview: NodeResultData = { ...base!, status: "running", output: text, model: node.data.model };
+              if (!budget.hasStreamFeedRoom(jsonSize(preview, MAX_NODE_TRACE_CHARS, "Node trace"))) return;
               // Backpressure: at most one write per node, no unbounded promise queue.
-              await writeMessage({ ...base!, status: "running", output: text, model: node.data.model });
+              await writeMessage(preview);
             },
           }));
           active();

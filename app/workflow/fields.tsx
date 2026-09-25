@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type ComponentProps,
   type KeyboardEvent,
@@ -19,13 +20,25 @@ function useDraft(value: string, onCommit: (value: string) => void) {
     setDraft(value);
   }, [value]);
 
+  // Blur runs before React re-renders, so it would still see the edited draft.
+  const cancelled = useRef(false);
+
   const commit = useCallback(() => {
+    if (cancelled.current) {
+      cancelled.current = false;
+      return;
+    }
     if (draft !== value) {
       onCommit(draft);
     }
   }, [draft, value, onCommit]);
 
-  return { draft, setDraft, commit };
+  const cancel = useCallback(() => {
+    cancelled.current = true;
+    setDraft(value);
+  }, [value]);
+
+  return { draft, setDraft, commit, cancel };
 }
 
 const inputClassName =
@@ -43,7 +56,7 @@ export function TextField({
   /** Size the input to its text so surrounding space stays free for dragging. */
   fit?: boolean;
 }) {
-  const { draft, setDraft, commit } = useDraft(value, onCommit);
+  const { draft, setDraft, commit, cancel } = useDraft(value, onCommit);
 
   const input = (
     <input
@@ -57,7 +70,7 @@ export function TextField({
           event.preventDefault();
           event.currentTarget.blur();
         } else if (event.key === "Escape") {
-          setDraft(value);
+          cancel();
           event.currentTarget.blur();
         }
       }}
@@ -91,7 +104,7 @@ export function TextArea({
   value: string;
   onCommit: (value: string) => void;
 }) {
-  const { draft, setDraft, commit } = useDraft(value, onCommit);
+  const { draft, setDraft, commit, cancel } = useDraft(value, onCommit);
 
   return (
     <textarea
@@ -103,7 +116,7 @@ export function TextArea({
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
           event.currentTarget.blur();
         } else if (event.key === "Escape") {
-          setDraft(value);
+          cancel();
           event.currentTarget.blur();
         }
       }}

@@ -20,6 +20,7 @@ declare module "next-auth" {
 }
 
 const OWNER: Principal = { id: "owner", name: "Owner", avatar: "", color: "#7654cb" };
+const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
 
 // One shared attempt budget across instances. Do not trust caller-supplied IPs.
 const LOGIN_ATTEMPT_SCRIPT = `
@@ -78,7 +79,7 @@ export function getAuthOptions(): NextAuthOptions {
 
   return {
     secret: process.env.NEXTAUTH_SECRET,
-    session: { strategy: "jwt", maxAge: 8 * 60 * 60 },
+    session: { strategy: "jwt", maxAge: SESSION_MAX_AGE_SECONDS },
     providers: [
       CredentialsProvider({
         name: "Owner password",
@@ -118,6 +119,9 @@ export function getAuthOptions(): NextAuthOptions {
         if (account?.provider === "credentials" && user?.id === OWNER.id) {
           token.sub = OWNER.id;
           token.ownerVersion = ownerVersion;
+          // next-auth slides the JWT expiry on every session read. Record the
+          // sign-in time so a session still ends eight hours after sign-in.
+          token.authTime = Math.floor(Date.now() / 1000);
         }
         return token;
       },
@@ -125,6 +129,8 @@ export function getAuthOptions(): NextAuthOptions {
         session.principal = null;
         if (
           token.sub === OWNER.id &&
+          typeof token.authTime === "number" &&
+          Date.now() / 1000 - token.authTime < SESSION_MAX_AGE_SECONDS &&
           typeof token.ownerVersion === "string" &&
           /^[a-f0-9]{64}$/.test(token.ownerVersion) &&
           timingSafeEqual(Buffer.from(token.ownerVersion, "hex"), Buffer.from(ownerVersion, "hex"))

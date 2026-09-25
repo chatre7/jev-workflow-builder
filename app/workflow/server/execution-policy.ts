@@ -20,6 +20,13 @@ export const MAX_NODE_TRACE_CHARS = 160_000;
 export const MAX_RUN_TRACE_CHARS = 512_000;
 export const TRACE_FINALIZATION_RESERVE_CHARS = 64_000;
 export const MAX_RUN_FEED_CHARS = 2_000_000;
+// Input writes once, ordinary nodes running/terminal, approvals
+// running/waiting/decided. Settled nodes are never replayed on resume, and each
+// mandatory version fits within that node's terminal message. Reserve all three
+// copies of the maximum message portion of a trace, not just one final trace.
+const MAX_MANDATORY_FEED_CHARS = 3 * (MAX_RUN_TRACE_CHARS - TRACE_FINALIZATION_RESERVE_CHARS);
+const MAX_ACTIVE_FEED_CHARS = MAX_RUN_FEED_CHARS - MAX_RUN_TRACE_CHARS - 4_096;
+const MAX_STREAM_FEED_CHARS = MAX_ACTIVE_FEED_CHARS - MAX_MANDATORY_FEED_CHARS;
 export const MAX_LLM_OUTPUT_CHARS = 16_384;
 export const MAX_LLM_OUTPUT_TOKENS = 2_048;
 export const MAX_RUN_LLM_OUTPUT_TOKENS = MAX_NODE_EXECUTIONS * MAX_LLM_OUTPUT_TOKENS;
@@ -191,8 +198,17 @@ export class RunBudget {
 
   feedWrite(size: number): void {
     // Keep space for one final copy of every failed message plus metadata.
-    checkLimit(this.feed + size, MAX_RUN_FEED_CHARS - MAX_RUN_TRACE_CHARS - 4_096, "Run feed writes");
+    checkLimit(this.feed + size, MAX_ACTIVE_FEED_CHARS, "Run feed writes");
     this.feed += size;
+  }
+
+  /**
+   * The cumulative feed count includes mandatory writes and survives approvals.
+   * Conservatively reserve all mandatory versions, including already-written
+   * ones, plus error finalization. Unused capacity is not extra preview room.
+   */
+  hasStreamFeedRoom(size: number): boolean {
+    return this.feed + size <= MAX_STREAM_FEED_CHARS;
   }
 }
 

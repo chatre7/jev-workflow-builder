@@ -302,11 +302,14 @@ async function routeHarness() {
       if (unavailable) throw new security.ApiError(429, "Daily run or reserved output-token budget reached.");
       return { release: async () => { calls.releases++; } };
     } },
-    "../../../../../../workflow/server/approvals": { claimApproval: async (options) => {
-      calls.claims++;
-      if (claimFailure) throw new security.ApiError(claimFailure, "Approval is unavailable.");
-      return options;
-    } },
+    "../../../../../../workflow/server/approvals": {
+      assertApprovalPending: async () => {},
+      claimApproval: async (options) => {
+        calls.claims++;
+        if (claimFailure) throw new security.ApiError(claimFailure, "Approval is unavailable.");
+        return options;
+      },
+    },
     "../../../../../../workflow/server/executor": { resumeWorkflowRun: (options) => {
       calls.resumes++;
       return { runId: options.runId, trace$: Promise.resolve({ runId: options.runId, status: "waiting", nodes: [], output: {} }) };
@@ -378,7 +381,17 @@ test("missing publication fence cannot authorize a durable but unconfirmed check
   const h = await routeHarness();
   h.setFeed({ status: "waiting" });
   assert.equal((await h.post()).status, 410);
+  assert.equal(h.calls.admissions, 0);
   assert.equal(h.calls.claims, 0);
   assert.equal(h.calls.resumes, 0);
-  assert.equal(h.calls.releases, 1);
+});
+
+test("stale approvals are rejected before admission reserves quota", async () => {
+  for (const status of ["running", "complete", "error"]) {
+    const h = await routeHarness();
+    h.setFeed({ status, approvalToken: "published-approval-token-for-tests" });
+    assert.equal((await h.post()).status, 409);
+    assert.equal(h.calls.admissions, 0);
+    assert.equal(h.calls.claims, 0);
+  }
 });

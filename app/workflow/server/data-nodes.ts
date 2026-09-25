@@ -13,7 +13,7 @@ export type DataNodeContext = {
   parents: Record<string, string>;
 };
 
-const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+const DECIMAL = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/;
 const RESERVED_SEGMENTS: Record<string, boolean> = { ["__proto__"]: true, constructor: true, prototype: true };
 
 export function validateDataSource(source: unknown): string[] {
@@ -72,13 +72,39 @@ function sourceReader(context: DataNodeContext): (source: string) => unknown {
   };
 }
 
-function numeric(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && DECIMAL.test(value)) {
-    const result = Number(value);
-    if (Number.isFinite(result)) return result;
+// Exact decimal: 0.digits × 10^point, with no leading or trailing zeros in digits.
+type Numeric = { sign: -1 | 0 | 1; digits: string; point: bigint };
+
+function numeric(value: unknown): Numeric {
+  const text = typeof value === "number" ? String(value) : value;
+  const match = typeof text === "string" && Number.isFinite(Number(text)) ? DECIMAL.exec(text) : null;
+  if (!match) throw new ExecutionError("Numeric conditions require finite decimal numbers, without blanks or whitespace.");
+  const integer = match[2] ?? "";
+  const all = integer + (match[3] ?? match[4] ?? "");
+  const leading = all.length - all.replace(/^0+/, "").length;
+  const digits = all.slice(leading).replace(/0+$/, "");
+  if (!digits) return { sign: 0, digits: "", point: BigInt(0) };
+  return {
+    sign: match[1] === "-" ? -1 : 1,
+    digits,
+    point: BigInt(integer.length - leading) + BigInt(match[5] ?? 0),
+  };
+}
+
+/** Compares decimal text exactly, so large integers and long fractions do not round. */
+function compareNumeric(left: unknown, right: unknown): number {
+  const a = numeric(left);
+  const b = numeric(right);
+  if (a.sign !== b.sign || a.sign === 0) return a.sign - b.sign;
+  let magnitude = a.point === b.point ? 0 : a.point > b.point ? 1 : -1;
+  if (magnitude === 0) {
+    // Without trailing zeros, a longer digit string that shares a prefix is larger.
+    magnitude = a.digits === b.digits ? 0
+      : a.digits.startsWith(b.digits) ? 1
+      : b.digits.startsWith(a.digits) ? -1
+      : a.digits > b.digits ? 1 : -1;
   }
-  throw new ExecutionError("Numeric conditions require finite decimal numbers, without blanks or whitespace.");
+  return magnitude * a.sign;
 }
 
 export function validateConditionOperands(operator: unknown, value: unknown): void {
@@ -97,7 +123,7 @@ export function evaluateCondition(data: ConditionNodeData, context: DataNodeCont
     case "ne": {
       let equal: boolean;
       if (typeof value === "string") equal = value === data.value;
-      else if (typeof value === "number") equal = numeric(value) === numeric(data.value);
+      else if (typeof value === "number") equal = compareNumeric(value, data.value) === 0;
       else if (typeof value === "boolean") {
         if (data.value !== "true" && data.value !== "false") throw new ExecutionError("Boolean conditions require true or false.");
         equal = value === (data.value === "true");
@@ -110,10 +136,10 @@ export function evaluateCondition(data: ConditionNodeData, context: DataNodeCont
     case "contains":
       if (typeof value !== "string") throw new ExecutionError("Contains conditions require a string source.");
       return value.includes(data.value);
-    case "gt": return numeric(value) > numeric(data.value);
-    case "gte": return numeric(value) >= numeric(data.value);
-    case "lt": return numeric(value) < numeric(data.value);
-    case "lte": return numeric(value) <= numeric(data.value);
+    case "gt": return compareNumeric(value, data.value) > 0;
+    case "gte": return compareNumeric(value, data.value) >= 0;
+    case "lt": return compareNumeric(value, data.value) < 0;
+    case "lte": return compareNumeric(value, data.value) <= 0;
     default: throw new ExecutionError("Condition contains an unsupported operator.");
   }
 }
