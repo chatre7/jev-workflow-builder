@@ -27,7 +27,7 @@ function fixtures(shared, kind = "llm") {
   };
 }
 
-async function harness({ streamText, readGraph, clientOverrides = {}, env = {}, globals = {} } = {}) {
+async function harness({ streamText, readGraph, clientOverrides = {}, approvals, env = {}, globals = {} } = {}) {
   let serial = 0;
   let graph;
   const events = [];
@@ -46,6 +46,7 @@ async function harness({ streamText, readGraph, clientOverrides = {}, env = {}, 
       "csv-parse/sync": csvParse,
       "./auth": { getPrincipal: async () => null },
       "./liveblocks": { getWorkspaceId: () => "private", getLiveblocks: () => client, readWorkflowGraph: (...args) => readGraph ? readGraph(...args) : Promise.resolve(graph) },
+      ...(approvals ? { "./approvals": approvals } : {}),
       ai: { streamText: streamText ?? (() => ({ textStream: (async function* () { yield "A helpful reply."; })() })) },
     },
     env,
@@ -178,17 +179,117 @@ test("templates read only own answer fields", async () => {
   assert.equal(render("[{{answers.constructor}}][{{answers.toString.probability}}][{{answers.risk.unknown}}]"), "[][][]");
 });
 
-test("streaming previews stop before they consume the feed reserve", async () => {
-  const h = await harness();
-  const { RunBudget, MAX_RUN_FEED_CHARS, MAX_RUN_TRACE_CHARS } = await h.load("app/workflow/server/execution-policy");
-  const budget = new RunBudget();
-  const room = MAX_RUN_FEED_CHARS - 2 * MAX_RUN_TRACE_CHARS - 4_096;
-  assert.equal(budget.hasStreamFeedRoom(room), true);
-  assert.equal(budget.hasStreamFeedRoom(room + 1), false);
-  budget.feedWrite(room);
-  assert.equal(budget.hasStreamFeedRoom(1), false);
-  // Regular writes may still use the space previews leave for later nodes.
-  budget.feedWrite(MAX_RUN_TRACE_CHARS);
+test("streaming previews leave room for every downstream running and complete message", async () => {
+  const runs = [];
+  for (const streaming of [false, true]) {
+    let now = 1_000;
+    const h = await harness({
+      env: { OPENROUTER_API_KEY: "test-key" },
+      globals: { Date: class extends Date { static now() { return now; } } },
+      streamText: () => ({ textStream: (async function* () {
+        for (let i = 0; i < 100; i++) {
+          if (streaming) now += 251;
+          yield "b".repeat(80);
+        }
+      })() }),
+    });
+    const graph = fixtures(h.shared);
+    const conditions = Array.from({ length: 21 }, (_, i) => h.shared.createConditionNode({
+      id: `condition-${i}`, position: { x: i + 2, y: 0 },
+      source: "input", operator: "contains", value: "b",
+    }));
+    graph.nodes.splice(2, 0, ...conditions);
+    graph.edges = graph.nodes.slice(1).map((target, index) => {
+      const source = graph.nodes[index];
+      return h.shared.createWorkflowEdge({
+        source: source.id, target: target.id,
+        sourceHandle: source.type === "condition" ? "true" : "out",
+        ...(target.type === "output" ? { targetHandle: "customer" } : {}),
+      });
+    });
+    h.setGraph(graph);
+    const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+    const trace = await startWorkflowRun({ roomId: "private-room", input: "a".repeat(10_000), trigger: "test" }).trace$;
+    assert.equal(trace.status, "complete", trace.error);
+    assert.deepEqual(Array.from(trace.output.customer), ["b".repeat(8_000)]);
+    assert.equal(trace.nodes.find((node) => node.nodeId === "condition-20").status, "complete");
+    const previews = h.events.filter((event) => event.data?.nodeType === "llm" && event.data.status === "running" && event.data.output);
+    if (streaming) assert(previews.length > 0, "ordinary runs must retain streaming previews");
+    else assert.equal(previews.length, 0);
+    const { MAX_RUN_FEED_CHARS, MAX_RUN_TRACE_CHARS } = await h.load("app/workflow/server/execution-policy");
+    const written = h.events.reduce((sum, event) => sum + (event.data ? JSON.stringify(event.data).length : 0), 0);
+    assert(written <= MAX_RUN_FEED_CHARS - MAX_RUN_TRACE_CHARS - 4_096);
+    assert.equal(h.events.at(-1).metadata.status, "complete");
+    runs.push(trace);
+  }
+  assert.deepEqual(Array.from(runs[1].output.customer), Array.from(runs[0].output.customer));
+});
+
+test("approval restarts preserve spent preview capacity and the mandatory feed limit", async () => {
+  let now = 1_000;
+  let checkpoint;
+  const approvals = {
+    saveApprovalCheckpoint: async (value) => { checkpoint = JSON.parse(JSON.stringify(value)); },
+    finishApprovalRun: async () => {},
+  };
+  const options = {
+    approvals,
+    env: { OPENROUTER_API_KEY: "test-key" },
+    globals: { Date: class extends Date { static now() { return now; } } },
+    streamText: () => ({ textStream: (async function* () {
+      for (let i = 0; i < 100; i++) {
+        now += 251;
+        yield "b".repeat(80);
+      }
+    })() }),
+  };
+  const h = await harness(options);
+  const s = h.shared;
+  const nodes = [
+    s.createInputNode({ position: { x: 0, y: 0 } }),
+    s.createLlmNode({ id: "first-llm", position: { x: 1, y: 0 } }),
+    s.createApprovalNode({ id: "first-approval", position: { x: 2, y: 0 } }),
+    s.createLlmNode({ id: "second-llm", position: { x: 3, y: 0 } }),
+    s.createApprovalNode({ id: "second-approval", position: { x: 4, y: 0 } }),
+    s.createOutputNode({ position: { x: 5, y: 0 } }),
+  ];
+  h.setGraph({ nodes, edges: nodes.slice(1).map((target, index) => s.createWorkflowEdge({
+    source: nodes[index].id, target: target.id,
+    sourceHandle: nodes[index].type === "approval" ? "approved" : "out",
+    ...(target.type === "output" ? { targetHandle: "customer" } : {}),
+  })) });
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const waiting = await startWorkflowRun({ roomId: "private-room", input: "a".repeat(10_000), trigger: "test" }).trace$;
+  assert.equal(waiting.status, "waiting", waiting.error);
+  assert(h.events.some((event) => event.data?.nodeType === "llm" && event.data.status === "running" && event.data.output));
+  const written = (events) => events.reduce((sum, event) => sum + (event.data ? JSON.stringify(event.data).length : 0), 0);
+  assert.equal(checkpoint.budget.feed, written(h.events));
+  const claim = (value, nodeId) => ({
+    checkpoint: value, nodeId, token: "claimed-phase", decision: "approved", decidedAt: now, decidedBy: "owner",
+  });
+  const restarted = await harness(options);
+  const { resumeWorkflowRun } = await restarted.load("app/workflow/server/executor");
+  const next = await resumeWorkflowRun(claim(checkpoint, "first-approval")).trace$;
+  assert.equal(next.status, "waiting", next.error);
+  assert.equal(restarted.events.filter((event) => event.data?.nodeType === "llm" && event.data.status === "running" && event.data.output).length, 0);
+  assert.equal(checkpoint.budget.feed, written(h.events) + written(restarted.events));
+  const finalCheckpoint = structuredClone(checkpoint);
+  const final = await resumeWorkflowRun(claim(finalCheckpoint, "second-approval")).trace$;
+  assert.equal(final.status, "complete", final.error);
+  assert.deepEqual(Array.from(final.output.customer), ["b".repeat(8_000)]);
+
+  // A persisted run at the mandatory limit must still fail, not borrow the
+  // error-finalization reserve or silently reset its counter on restart.
+  const capped = await harness(options);
+  const { MAX_RUN_FEED_CHARS, MAX_RUN_TRACE_CHARS } = await capped.load("app/workflow/server/execution-policy");
+  finalCheckpoint.budget.feed = MAX_RUN_FEED_CHARS - MAX_RUN_TRACE_CHARS - 4_096;
+  const cappedExecutor = await capped.load("app/workflow/server/executor");
+  const failed = await cappedExecutor.resumeWorkflowRun(claim(finalCheckpoint, "second-approval")).trace$;
+  assert.equal(failed.status, "error");
+  assert.match(failed.error, /Run feed writes/);
+  assert.equal(capped.events.at(-1).metadata.status, "error");
+  assert(capped.events.some((event) => event.data?.nodeId === "second-approval" && event.data.status === "error"));
+  assert(finalCheckpoint.budget.feed + written(capped.events) <= MAX_RUN_FEED_CHARS);
 });
 
 test("numeric conditions compare decimal text exactly", async () => {

@@ -34,6 +34,11 @@ Liveblocks, password authentication, and shared Redis admission.
 8. Optionally configure the HTTP connections and document catalog described below.
 9. Run `npm run dev`, sign in with your owner password, and create a workflow.
 
+Keep the `@liveblocks/*` dependencies pinned to the same compatible version when
+upgrading. `@liveblocks/react-flow` pins its React integration exactly; a second
+installed `@liveblocks/react` instance gives its hooks a different room context
+and breaks the editor even when the build succeeds.
+
 The owner accesses **one private workspace** from any signed-in device.
 `WORKFLOW_WORKSPACE_ID` selects that workspace
 on the server (default `private`), never from a URL parameter. Keep its value
@@ -290,6 +295,13 @@ same run ID; `?wait=true` returns the next phase's trace. Duplicate/busy decisio
 return `409`; expired/unavailable checkpoints return `410`. The server records
 the deciding owner and time.
 
+Before reserving execution quota, the server checks the authoritative Redis
+checkpoint, phase token, pending node, and expiry. Already expired or unavailable
+approvals are rejected without a reservation. This check does not consume the
+checkpoint, so quota denial leaves a valid approval pending. The atomic claim is
+still rechecked under the run lease; a reservation is not refunded if the
+checkpoint expires or another decision wins after the preflight check.
+
 Claims atomically consume the resumable snapshot before execution. If a claimed
 resume is interrupted, it stays consumed and is **not automatically replayed**.
 Verify external side effects before starting a new run. A checkpoint-save failure
@@ -404,6 +416,12 @@ or deadline stops further work and produces an error trace; provider and storage
 requests receive cancellation signals. Feed persistence is bounded and
 best-effort: a feed-service outage does not guarantee a saved history entry.
 
+Streaming previews are optional: they stop early enough to reserve all mandatory
+node-message versions (including running, waiting, and decided approvals) and
+error finalization. The conservative preview cutoff uses the cumulative feed
+budget, including across approval pauses; resuming does not replenish it. Final
+node outputs are still recorded after previews stop.
+
 ### Existing public demo data
 
 New rooms use `jev:workflows:<workspace>:<workflowId>`, private default access,
@@ -433,11 +451,13 @@ with isolated external services. They cover authorization, workspace isolation,
 request bounds, graph amplification, provider cancellation, deadlines, HTTP SSRF
 and credential handling, lexical retrieval, approval resume/replay boundaries,
 CSV quoting, Unicode, row/column bounds, JSON-size amplification, preview access
-and full-data validation, literal questions across approval resumes, and exact
-Table arithmetic, typed grouping, filtering and output-budget boundaries.
+and full-data validation, literal questions across approval resumes, exact
+Table arithmetic, typed grouping, filtering and output-budget boundaries, and
+streaming followed by large downstream traces and approval restarts.
 
 The separate Redis integration suite executes the actual Lua admission and
-approval claim/fencing scripts against an ephemeral local Redis container:
+approval preflight/claim/fencing scripts against an ephemeral local Redis
+container, including expired approval requests that must not consume quota:
 
 ```sh
 docker run --rm --name jev-security-redis redis:7-alpine redis-server --save "" --appendonly no

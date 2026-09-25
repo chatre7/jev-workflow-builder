@@ -1,6 +1,6 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { getPrincipal } from "../../../../../../workflow/server/auth";
-import { claimApproval } from "../../../../../../workflow/server/approvals";
+import { assertApprovalPending, claimApproval } from "../../../../../../workflow/server/approvals";
 import { resumeWorkflowRun } from "../../../../../../workflow/server/executor";
 import { getLiveblocks, getRoomId, getWorkflow } from "../../../../../../workflow/server/liveblocks";
 import { acquireRunLease } from "../../../../../../workflow/server/run-admission";
@@ -46,9 +46,12 @@ export async function POST(
     const workflow = await getWorkflow(workflowId, principal);
     if (!workflow) throw new ApiError(404, "Workflow not found.");
     const roomId = getRoomId(workflowId);
-    // Admission consumes daily quota, so reject stale approvals (double clicks,
-    // finished or expired runs) before reserving it. Rechecked under the lease.
-    await readApprovalToken(roomId, runId);
+    // Feed publication alone outlives Redis TTL expiry. Check the authoritative
+    // checkpoint before nonrefundable admission, without consuming it.
+    const expectedToken = await readApprovalToken(roomId, runId);
+    await assertApprovalPending({
+      roomId, runId, nodeId: body.nodeId, decision: body.decision, actorId: principal.id, expectedToken,
+    });
     let lease;
     try {
       lease = await acquireRunLease(principal.id, roomId);

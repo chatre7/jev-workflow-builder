@@ -302,11 +302,14 @@ async function routeHarness() {
       if (unavailable) throw new security.ApiError(429, "Daily run or reserved output-token budget reached.");
       return { release: async () => { calls.releases++; } };
     } },
-    "../../../../../../workflow/server/approvals": { claimApproval: async (options) => {
-      calls.claims++;
-      if (claimFailure) throw new security.ApiError(claimFailure, "Approval is unavailable.");
-      return options;
-    } },
+    "../../../../../../workflow/server/approvals": {
+      assertApprovalPending: async () => {},
+      claimApproval: async (options) => {
+        calls.claims++;
+        if (claimFailure) throw new security.ApiError(claimFailure, "Approval is unavailable.");
+        return options;
+      },
+    },
     "../../../../../../workflow/server/executor": { resumeWorkflowRun: (options) => {
       calls.resumes++;
       return { runId: options.runId, trace$: Promise.resolve({ runId: options.runId, status: "waiting", nodes: [], output: {} }) };

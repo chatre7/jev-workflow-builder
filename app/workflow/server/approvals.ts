@@ -76,6 +76,7 @@ local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 local found = false
 for _, item in ipairs(cjson.decode(redis.call('HGET', KEYS[1], 'pending'))) do
   if item.expiresAt <= now then
+    if ARGV[11] == 'check' then return {410} end
     redis.call('HSET', KEYS[1], 'status', 'expired')
     redis.call('HDEL', KEYS[1], 'payload', 'pending')
     return {410}
@@ -88,6 +89,8 @@ if not found then
 end
 local payload = redis.call('HGET', KEYS[1], 'payload')
 if not payload or string.len(payload) > tonumber(ARGV[9]) then return {410} end
+-- Preflight validates the same durable state without consuming the checkpoint.
+if ARGV[11] == 'check' then return {1, payload, now} end
 redis.call('HSET', KEYS[1], 'status', 'running', 'token', ARGV[7], 'decided:' .. ARGV[4], cjson.encode({decision = ARGV[5], actor = ARGV[6], at = now}))
 -- Consume the only resumable copy before returning it. A crashed worker cannot replay it.
 redis.call('HDEL', KEYS[1], 'payload', 'pending')
@@ -134,14 +137,24 @@ export async function saveApprovalCheckpoint(
   if (result !== 1) throw new ExecutionError("Approval checkpoint expired or was already consumed.");
 }
 
-export async function claimApproval(options: {
+type ApprovalDecision = {
   roomId: string;
   runId: string;
   nodeId: string;
   decision: "approved" | "rejected";
   actorId: string;
   expectedToken: string;
-}): Promise<ClaimedApproval> {
+};
+
+export async function assertApprovalPending(options: ApprovalDecision): Promise<void> {
+  await readApproval(options, false);
+}
+
+export async function claimApproval(options: ApprovalDecision): Promise<ClaimedApproval> {
+  return readApproval(options, true);
+}
+
+async function readApproval(options: ApprovalDecision, consume: boolean): Promise<ClaimedApproval> {
   const { roomId, runId, nodeId, decision, actorId, expectedToken } = options;
   if (!/^run-[A-Za-z0-9_-]{1,64}$/.test(runId) || !/^[A-Za-z0-9_-]{1,96}$/.test(nodeId) ||
       !["approved", "rejected"].includes(decision) || actorId !== "owner" ||
@@ -149,11 +162,12 @@ export async function claimApproval(options: {
     throw new ApiError(400, "Invalid approval decision.");
   }
   const { key, workspace } = binding(roomId, runId);
-  const token = randomUUID();
+  const token = consume ? randomUUID() : expectedToken;
   let response: unknown;
   try {
     response = await getRedis().eval(CLAIM_APPROVAL_SCRIPT, [key], [
       workspace, roomId, runId, nodeId, decision, actorId, token, APPROVAL_TTL_MS, MAX_APPROVAL_CHECKPOINT_BYTES, expectedToken,
+      consume ? "claim" : "check",
     ]);
   } catch {
     throw new ApiError(503, "Approval storage is unavailable. No execution was started.");
@@ -172,7 +186,7 @@ export async function claimApproval(options: {
     new RunBudget(checkpoint.budget);
     return { checkpoint, token, nodeId, decision, decidedAt, decidedBy: actorId };
   } catch {
-    // The claim is deliberately consumed even if the saved data cannot be read.
+    // A consuming claim stays closed even if the saved data cannot be read.
     throw new ApiError(410, "This approval checkpoint is unavailable and cannot be resumed.");
   }
 }

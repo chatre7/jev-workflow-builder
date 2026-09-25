@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { test } from "node:test";
+import * as csvParse from "csv-parse/sync";
 import { createModuleLoader } from "./load-module.mjs";
 
 const exec = promisify(execFile);
@@ -16,11 +17,11 @@ async function redisCommand(...args) {
   return value;
 }
 
-function loader(workspace, evalOverride) {
+function loader(workspace, evalOverride, stubs = {}) {
   return createModuleLoader({
-    env: { UPSTASH_REDIS_REST_URL: "https://local-redis.test", UPSTASH_REDIS_REST_TOKEN: "local-only" },
+    env: { UPSTASH_REDIS_REST_URL: "https://local-redis.test", UPSTASH_REDIS_REST_TOKEN: "local-only", NEXTAUTH_URL: "https://workflow.example" },
     stubs: {
-      nanoid: { nanoid: randomUUID },
+      nanoid: { nanoid: () => randomUUID() },
       "./liveblocks": { getWorkspaceId: () => workspace },
       "./auth": { getPrincipal: async () => null },
       "@upstash/redis": { Redis: class {
@@ -28,6 +29,7 @@ function loader(workspace, evalOverride) {
           return evalOverride ? evalOverride(script, keys, args) : redisCommand("EVAL", script, keys.length, ...keys, ...args);
         }
       } },
+      ...stubs,
     },
   });
 }
@@ -173,4 +175,152 @@ test("unpublished or old phase tokens cannot claim a possibly saved checkpoint",
   await assert.rejects(storage.claimApproval(options(saved, "right", "approved", unpublished)), (error) => error.status === 410);
   const accepted = await storage.claimApproval(options(saved, "right", "approved", first.token));
   assert.equal(accepted.nodeId, "right");
+});
+
+async function routeHarness({ expireOnRecheck = false } = {}) {
+  const workspace = randomUUID();
+  const roomId = `room-${randomUUID()}`;
+  let metadata;
+  let graph;
+  let finished;
+  let feedReads = 0;
+  const messages = [];
+  const client = {
+    createFeed: async (args) => { metadata = args.metadata; },
+    updateFeed: async (args) => { metadata = args.metadata; },
+    getFeed: async () => {
+      if (++feedReads === 2 && expireOnRecheck) await redisCommand("PEXPIREAT", key, 1);
+      return { metadata };
+    },
+    createFeedMessage: async (args) => { messages.push(args); },
+    updateFeedMessage: async () => {},
+  };
+  const liveblocks = {
+    getWorkspaceId: () => workspace, getRoomId: () => roomId,
+    getWorkflow: async () => ({ workflowId: "workflow" }),
+    getLiveblocks: () => client, readWorkflowGraph: async () => graph,
+  };
+  const load = loader(workspace, undefined, {
+    "./liveblocks": liveblocks,
+    "../../../../../../workflow/server/liveblocks": liveblocks,
+    "./auth": { getPrincipal: async () => ({ id: "owner", name: "Owner" }) },
+    "../../../../../../workflow/server/auth": { getPrincipal: async () => ({ id: "owner", name: "Owner" }) },
+    "next/server": { NextResponse: Response, after: (callback) => { finished = callback(); } },
+    "csv-parse/sync": csvParse,
+    "./http": { runHttpRequest: async () => { throw new Error("Unexpected HTTP request"); } },
+    "./knowledge": { searchKnowledge: async () => { throw new Error("Unexpected knowledge request"); } },
+    "./llm": { runLlm: async () => { throw new Error("Unexpected LLM request"); } },
+    "./typesafe": { askJev: async () => { throw new Error("Unexpected Jev request"); }, toTypeSafeQuestions: () => ({}) },
+  });
+  const shared = await load("app/workflow/shared");
+  graph = {
+    nodes: [
+      shared.createInputNode({ id: "input", position: { x: 0, y: 0 } }),
+      shared.createApprovalNode({ id: "approval", position: { x: 0, y: 0 } }),
+      shared.createOutputNode({ id: "output", position: { x: 0, y: 0 } }),
+    ],
+    edges: [
+      shared.createWorkflowEdge({ source: "input", target: "approval", sourceHandle: "out", targetHandle: "in" }),
+      shared.createWorkflowEdge({ source: "approval", target: "output", sourceHandle: "approved", targetHandle: "customer" }),
+    ],
+  };
+  const executor = await load("app/workflow/server/executor");
+  const waiting = await executor.startWorkflowRun({ roomId, input: "durable request", trigger: "test" }).trace$;
+  assert.equal(waiting.status, "waiting", waiting.error);
+  const saved = { roomId, runId: waiting.runId };
+  const key = storageKey(workspace, saved);
+  const prefix = `jev:admission:{${createHash("sha256").update(workspace).digest("hex").slice(0, 24)}}`;
+  const user = `${prefix}:user:${createHash("sha256").update("owner").digest("hex")}`;
+  const counters = [ `${prefix}:minute`, `${user}:minute`, `${prefix}:day`, `${user}:day`, `${prefix}:output-tokens`, `${user}:output-tokens` ];
+  const route = await load("app/api/workflows/[workflowId]/runs/[runId]/approval/route.ts");
+  return {
+    key, counters, messages, metadata, load,
+    async post(nodeId = "approval") {
+      const request = new Request(`https://workflow.example/api/workflows/workflow/runs/${waiting.runId}/approval?wait=true`, {
+        method: "POST", headers: { "content-type": "application/json", origin: "https://workflow.example" },
+        body: JSON.stringify({ nodeId, decision: "approved" }),
+      });
+      request.nextUrl = new URL(request.url);
+      const response = await route.POST(request, { params: Promise.resolve({ workflowId: "workflow", runId: waiting.runId }) });
+      await finished;
+      return response;
+    },
+  };
+}
+
+test("authoritative preflight rejects unavailable approvals without minute, daily or output reservations", async () => {
+  for (const scenario of ["expired", "missing", "expired-node", "invalid-node", "decided-node", "token", "missing-payload", "invalid-payload", "consumed"]) {
+    const h = await routeHarness();
+    let nodeId = "approval";
+    let status = 410;
+    if (scenario === "expired") await redisCommand("PEXPIREAT", h.key, 1);
+    if (scenario === "missing") await redisCommand("DEL", h.key);
+    if (scenario === "expired-node") await redisCommand("HSET", h.key, "pending", JSON.stringify([{ nodeId, expiresAt: 1 }]));
+    if (scenario === "invalid-node") nodeId = "unknown";
+    if (scenario === "decided-node") {
+      nodeId = "previous";
+      status = 409;
+      await redisCommand("HSET", h.key, "decided:previous", "{}");
+    }
+    if (scenario === "token") await redisCommand("HSET", h.key, "token", randomUUID());
+    if (scenario === "missing-payload") await redisCommand("HDEL", h.key, "payload");
+    if (scenario === "invalid-payload") await redisCommand("HSET", h.key, "payload", "invalid JSON");
+    if (scenario === "consumed") {
+      status = 409;
+      await redisCommand("HSET", h.key, "status", "running");
+    }
+    // Liveblocks still advertises waiting: only Redis can reject these requests.
+    assert.equal(h.metadata.status, "waiting");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      assert.equal((await h.post(nodeId)).status, status, scenario);
+    }
+    assert.deepEqual(await redisCommand("MGET", ...h.counters), Array(6).fill(null), scenario);
+  }
+});
+
+test("quota denial keeps the checkpoint pending, then successful admission resumes it only once", async () => {
+  const h = await routeHarness();
+  const payload = await redisCommand("HGET", h.key, "payload");
+  const admission = await h.load("app/workflow/server/run-admission");
+  await redisCommand("SET", h.counters[2], admission.ADMISSION_LIMITS.workspacePerDay);
+  assert.equal((await h.post()).status, 429);
+  assert.equal(await redisCommand("HGET", h.key, "payload"), payload);
+  assert.equal(await redisCommand("HGET", h.key, "status"), "waiting");
+  assert.equal(await redisCommand("HEXISTS", h.key, "decided:approval"), 0);
+  await redisCommand("DEL", h.counters[2]);
+  const accepted = await h.post();
+  assert.equal(accepted.status, 200);
+  const trace = await accepted.json();
+  assert.equal(trace.status, "complete", trace.error);
+  assert.deepEqual(trace.output.customer, ["durable request"]);
+  assert.equal(await redisCommand("HEXISTS", h.key, "payload"), 0);
+  const reserved = await redisCommand("MGET", ...h.counters);
+  const policy = await h.load("app/workflow/server/execution-policy");
+  assert.deepEqual(reserved, ["1", "1", "1", "1", String(policy.MAX_RUN_LLM_OUTPUT_TOKENS), String(policy.MAX_RUN_LLM_OUTPUT_TOKENS)]);
+  assert.equal((await h.post()).status, 409);
+  assert.deepEqual(await redisCommand("MGET", ...h.counters), reserved);
+});
+
+test("concurrent route decisions resume the durable checkpoint exactly once", async () => {
+  const h = await routeHarness();
+  const responses = await Promise.all(Array.from({ length: 8 }, () => h.post()));
+  assert.equal(responses.filter((response) => response.status === 200).length, 1);
+  assert(responses.every((response) => [200, 409].includes(response.status)));
+  const trace = await responses.find((response) => response.status === 200).json();
+  assert.equal(trace.status, "complete", trace.error);
+  assert.deepEqual(trace.output.customer, ["durable request"]);
+  assert.equal(await redisCommand("HGET", h.key, "status"), "complete");
+  assert.equal(await redisCommand("HEXISTS", h.key, "payload"), 0);
+  assert.equal(h.messages.filter((message) => message.data?.nodeId === "output").length, 1);
+});
+
+test("expiry after preflight cannot resume and does not refund an admitted reservation", async () => {
+  const h = await routeHarness({ expireOnRecheck: true });
+  assert.equal((await h.post()).status, 410);
+  const policy = await h.load("app/workflow/server/execution-policy");
+  const reserved = ["1", "1", "1", "1", String(policy.MAX_RUN_LLM_OUTPUT_TOKENS), String(policy.MAX_RUN_LLM_OUTPUT_TOKENS)];
+  assert.deepEqual(await redisCommand("MGET", ...h.counters), reserved);
+  assert.equal(h.messages.filter((message) => message.data?.nodeId === "output").length, 0);
+  assert.equal((await h.post()).status, 410);
+  assert.deepEqual(await redisCommand("MGET", ...h.counters), reserved);
 });
