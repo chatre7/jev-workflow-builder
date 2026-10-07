@@ -47,7 +47,12 @@ async function harness({ streamText, readGraph, clientOverrides = {}, approvals,
       "./auth": { getPrincipal: async () => null },
       "./liveblocks": { getWorkspaceId: () => "private", getLiveblocks: () => client, readWorkflowGraph: (...args) => readGraph ? readGraph(...args) : Promise.resolve(graph) },
       ...(approvals ? { "./approvals": approvals } : {}),
-      ai: { streamText: streamText ?? (() => ({ textStream: (async function* () { yield "A helpful reply."; })() })) },
+      ai: {
+        streamText: streamText ?? (() => ({ textStream: (async function* () { yield "A helpful reply."; })() })),
+        // Pass-through stand-ins so JSON mode can assert what the SDK would receive.
+        Output: { object: (spec) => ({ kind: "object", ...spec }) },
+        jsonSchema: (schema) => ({ jsonSchema: schema }),
+      },
     },
     env,
     globals,
@@ -1057,4 +1062,108 @@ test("run usage totals mark calls that reported no cost instead of guessing", as
   assert.equal(formatCost(0), "$0");
   assert.equal(formatCost(0.00123), "$0.0012");
   assert.equal(formatCost(1.5), "$1.50");
+});
+
+function jsonFixtures(shared, fields) {
+  const graph = fixtures(shared);
+  graph.nodes[1] = shared.createLlmNode({ id: "middle", position: { x: 1, y: 0 }, outputFormat: "json", fields });
+  return graph;
+}
+
+const SENTIMENT_FIELDS = [
+  { id: "f1", name: "sentiment", type: "string", description: "positive, neutral or negative", required: true },
+  { id: "f2", name: "score", type: "number", description: "", required: true },
+  { id: "f3", name: "tags", type: "string[]", description: "", required: false },
+  { id: "f4", name: "refund", type: "boolean", description: "", required: false },
+];
+
+test("LLM JSON mode sends a closed schema and canonicalizes a matching reply", async () => {
+  let received;
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    streamText: (options) => {
+      received = options;
+      return { textStream: (async function* () {
+        yield "```json\n{\"score\": 0.25, \"extra\": \"dropped\", ";
+        yield "\"sentiment\": \"negative\", \"tags\": [\"billing\"], \"refund\": null}\n```";
+      })() };
+    },
+  });
+  h.setGraph(jsonFixtures(h.shared, SENTIMENT_FIELDS));
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "private-room", input: "hello", trigger: "test" }).trace$;
+  assert.equal(trace.status, "complete", trace.error);
+  assert.deepEqual(plain(received.output), { kind: "object", name: "response", schema: { jsonSchema: {
+    type: "object",
+    properties: {
+      sentiment: { type: "string", description: "positive, neutral or negative" },
+      score: { type: "number" },
+      tags: { type: "array", items: { type: "string" } },
+      refund: { type: "boolean" },
+    },
+    required: ["sentiment", "score"],
+    additionalProperties: false,
+  } } });
+  const llm = trace.nodes.find((node) => node.nodeType === "llm");
+  // Declared order, unknown keys dropped, null optional field omitted.
+  assert.equal(llm.output, '{"sentiment":"negative","score":0.25,"tags":["billing"]}');
+  assert.deepEqual(Array.from(trace.output.customer), [llm.output]);
+});
+
+test("LLM JSON mode fails the run on prose, wrong types, and missing required fields", async () => {
+  const cases = [
+    ["Sure! Here is the sentiment: negative.", /valid JSON/],
+    ['["negative"]', /not an object/],
+    ['{"sentiment": "negative"}', /missing the required field 'score'/],
+    ['{"sentiment": "negative", "score": "0.25"}', /'score' is not a number/],
+    ['{"sentiment": "negative", "score": 1, "tags": [1]}', /'tags' is not a string\[\]/],
+    ['{"sentiment": "negative", "score": 1, "refund": "yes"}', /'refund' is not a boolean/],
+  ];
+  for (const [reply, pattern] of cases) {
+    const h = await harness({
+      env: { OPENROUTER_API_KEY: "test-key" },
+      streamText: () => ({ textStream: (async function* () { yield reply; })() }),
+    });
+    h.setGraph(jsonFixtures(h.shared, SENTIMENT_FIELDS));
+    const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+    const trace = await startWorkflowRun({ roomId: "private-room", input: "hello", trigger: "test" }).trace$;
+    assert.equal(trace.status, "error");
+    assert.match(trace.error, pattern);
+    assert.equal(h.events.at(-1).metadata.status, "error");
+  }
+});
+
+test("LLM JSON mode validates saved fields and the mock returns the configured shape", async () => {
+  const h = await harness();
+  const { validateWorkflowGraph } = await h.load("app/workflow/server/execution-validation");
+  const base = SENTIMENT_FIELDS;
+  const invalid = [
+    [],
+    Array.from({ length: 17 }, (_, index) => ({ ...base[0], id: `f${index}`, name: `f${index}` })),
+    [{ ...base[0], name: "__proto__" }],
+    [{ ...base[0], name: "has space" }],
+    [base[0], { ...base[1], name: "sentiment" }],
+    [{ ...base[0], type: "object" }],
+    [{ ...base[0], description: "x".repeat(501) }],
+    [{ ...base[0], required: "yes" }],
+    [{ ...base[0], description: 5 }],
+  ];
+  for (const fields of invalid) assert.throws(() => validateWorkflowGraph(jsonFixtures(h.shared, fields)), /LLM (JSON )?output/);
+  const graph = jsonFixtures(h.shared, base);
+  graph.nodes[1].data.outputFormat = "xml";
+  assert.throws(() => validateWorkflowGraph(graph), /text or json/);
+  // Text mode ignores stale fields, and an absent format still means text.
+  graph.nodes[1].data.outputFormat = "text";
+  graph.nodes[1].data.fields = [{ broken: true }];
+  validateWorkflowGraph(graph);
+  delete graph.nodes[1].data.outputFormat;
+  validateWorkflowGraph(graph);
+
+  h.setGraph(jsonFixtures(h.shared, base));
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "private-room", input: "hello", trigger: "test" }).trace$;
+  assert.equal(trace.status, "complete", trace.error);
+  const llm = trace.nodes.find((node) => node.nodeType === "llm");
+  assert.equal(llm.mock, true);
+  assert.deepEqual(JSON.parse(llm.output), { sentiment: "mock sentiment", score: 0, tags: ["mock tags"], refund: false });
 });

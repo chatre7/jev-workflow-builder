@@ -31,6 +31,10 @@ export const CONDITION_OPERATORS = [
 ] as const;
 export type ConditionOperator = (typeof CONDITION_OPERATORS)[number]["id"];
 export const MAX_TRANSFORM_FIELDS = 8;
+export const MAX_LLM_FIELDS = 16;
+export const MAX_LLM_FIELD_DESCRIPTION_CHARS = 500;
+export const LLM_FIELD_TYPES = ["string", "number", "boolean", "string[]"] as const;
+export type LlmFieldType = (typeof LLM_FIELD_TYPES)[number];
 export const MAX_DATA_SOURCE_CHARS = 256;
 export const MAX_CSV_ROWS = 500;
 export const MAX_CSV_COLUMNS = 64;
@@ -172,11 +176,23 @@ export type JevNodeData = {
   activation?: ActivationMode;
 };
 
+export type LlmOutputField = {
+  id: string;
+  name: string;
+  type: LlmFieldType;
+  description: string;
+  required: boolean;
+};
+
 export type LlmNodeData = {
   label: string;
   model: string;
   system: string;
   prompt: string;
+  // "json" asks the provider for an object with `fields` and validates the
+  // reply; the node's output is then JSON text. Absent means plain text.
+  outputFormat?: "text" | "json";
+  fields?: LlmOutputField[];
   activation?: ActivationMode;
 };
 
@@ -520,6 +536,10 @@ export function createOutputNode(args: {
   };
 }
 
+export function createLlmOutputField(index: number): LlmOutputField {
+  return { id: `field-${nanoid(6)}`, name: `field_${index}`, type: "string", description: "", required: true };
+}
+
 export function createLlmNode(args: {
   id?: string;
   position: Point;
@@ -527,6 +547,8 @@ export function createLlmNode(args: {
   model?: string;
   system?: string;
   prompt?: string;
+  outputFormat?: "text" | "json";
+  fields?: LlmOutputField[];
   activation?: ActivationMode;
   selected?: boolean;
 }): LlmNode {
@@ -540,6 +562,9 @@ export function createLlmNode(args: {
       model: args.model ?? DEFAULT_LLM_MODEL,
       system: args.system ?? "",
       prompt: args.prompt ?? "{{input}}",
+      ...(args.outputFormat === "json"
+        ? { outputFormat: "json" as const, fields: args.fields ?? [createLlmOutputField(1)] }
+        : {}),
       activation: args.activation ?? "any",
     },
   };

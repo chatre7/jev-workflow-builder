@@ -11,11 +11,15 @@ import {
   checkLimit,
 } from "./execution-policy";
 import type { NodeUsage } from "../runs";
+import type { LlmOutputField } from "../shared";
+import { buildOutputSchema, mockStructuredOutput } from "./structured";
 
 export type LlmRunOptions = {
   system: string;
   prompt: string;
   model: string;
+  // When set, the provider is asked for a JSON object with these fields.
+  fields?: readonly LlmOutputField[];
   // Reserve the delta against the run budget before accumulating or publishing.
   reserveOutput: (delta: string) => void;
   onChunk: (text: string) => void | Promise<void>;
@@ -68,7 +72,7 @@ export async function runLlm(options: LlmRunOptions): Promise<LlmResult> {
     if (!apiKey) {
       return await streamMockReply({ ...options, signal });
     }
-    const [{ streamText }, { createOpenRouter }] = await abortable(
+    const [{ streamText, Output, jsonSchema }, { createOpenRouter }] = await abortable(
       Promise.all([import("ai"), import("@openrouter/ai-sdk-provider")]),
       signal
     );
@@ -83,8 +87,17 @@ export async function runLlm(options: LlmRunOptions): Promise<LlmResult> {
       abortSignal: signal,
       maxOutputTokens: MAX_LLM_OUTPUT_TOKENS,
       maxRetries: 0,
+      // JSON mode: the AI SDK maps this to the provider's schema-constrained
+      // response format. The reply is validated again by the executor.
+      ...(options.fields
+        ? { output: Output.object({ schema: jsonSchema(buildOutputSchema(options.fields)), name: "response" }) }
+        : {}),
       // Provider errors are handled below, never logged with request credentials.
-      onError: () => { streamFailed = true; },
+      onError: ({ error }) => {
+        // The SDK's own object parse runs at finish; the executor reports that case precisely.
+        if ((error as { name?: unknown } | null)?.name === "AI_NoObjectGeneratedError") return;
+        streamFailed = true;
+      },
     });
     iterator = result.textStream[Symbol.asyncIterator]();
     let text = "";
@@ -124,7 +137,7 @@ export async function runLlm(options: LlmRunOptions): Promise<LlmResult> {
 async function streamMockReply(options: LlmRunOptions): Promise<LlmResult> {
   checkAbort(options.signal);
   const firstLine = options.prompt.match(/[^\r\n]*\S[^\r\n]*/)?.[0].trim() ?? "the request";
-  const reply = [
+  const reply = options.fields ? mockStructuredOutput(options.fields) : [
     "Thanks for reaching out, and sorry for the trouble.",
     `Here is a mock reply for: "${firstLine.slice(0, 120)}".`,
     "Set OPENROUTER_API_KEY to stream a real model response through this node.",

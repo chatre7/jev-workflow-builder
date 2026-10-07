@@ -66,6 +66,7 @@ import { validateWorkflowGraph, type ValidatedWorkflowGraph } from "./execution-
 import { evaluateCondition, transformData, type DataNodeContext } from "./data-nodes";
 import { getLiveblocks, readWorkflowGraph } from "./liveblocks";
 import { runLlm } from "./llm";
+import { parseStructuredOutput } from "./structured";
 import { askJev, toTypeSafeQuestions, type JevState } from "./typesafe";
 import { runHttpRequest } from "./http";
 import { searchKnowledge } from "./knowledge";
@@ -460,8 +461,9 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
           let lastWrite = Date.now();
           const streamBaseSize = jsonSize({ ...base, output: "", model: node.data.model }, MAX_NODE_TRACE_CHARS, "Node trace");
           let streamOutputSize = 0;
+          const fields = node.data.outputFormat === "json" ? node.data.fields : undefined;
           const result = await provider(() => runLlm({
-            prompt, system, model: node.data.model, signal,
+            prompt, system, model: node.data.model, signal, fields,
             reserveOutput: (delta) => {
               active();
               budget.text(delta.length);
@@ -481,12 +483,14 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
             },
           }));
           active();
+          // Canonical JSON is never longer than the streamed reply it was reserved from.
+          const output = fields ? parseStructuredOutput(result.text, fields) : result.text;
           await writeMessage({
-            ...base, status: "complete", output: result.text, firedHandles: [OUT_HANDLE],
+            ...base, status: "complete", output, firedHandles: [OUT_HANDLE],
             mock: result.mock, model: result.model, durationMs: Date.now() - nodeStartedAt,
             ...(result.usage ? { usage: result.usage } : {}),
           });
-          return { output: result.text, answers, firedHandles: new Set([OUT_HANDLE]) };
+          return { output, answers, firedHandles: new Set([OUT_HANDLE]) };
         }
         if (node.type === "condition" || node.type === "transform") {
           const parentOutputs: Record<string, string> = Object.create(null);
