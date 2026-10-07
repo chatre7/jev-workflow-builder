@@ -1,6 +1,5 @@
 "use client";
 
-import { useDeleteFeed, useFeeds, useOthers } from "@liveblocks/react";
 import { useEdges, useNodes, useNodesData, useReactFlow } from "@xyflow/react";
 import {
   AlertCircle,
@@ -30,7 +29,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useApprovalExpired, useRun } from "./run-context";
+import { RunRequestError, useApprovalExpired, useRun } from "./run-context";
 import { KnowledgeResultPreview } from "./nodes";
 import {
   formatCost,
@@ -42,7 +41,7 @@ import {
   type RunStatus,
   type UsageTotals,
 } from "./runs";
-import type { WorkflowSummary } from "./server/liveblocks";
+import type { WorkflowSummary } from "./server/store";
 import {
   FALSE_HANDLE,
   INPUT_NODE_ID,
@@ -274,11 +273,9 @@ function AnswerView({ id, answer }: { id: string; answer: Answer }) {
 
 function ApprovalReview({
   message,
-  workflowId,
   runId,
 }: {
   message: NodeResultData;
-  workflowId: string;
   runId: string;
 }) {
   const approval = message.approval;
@@ -288,6 +285,7 @@ function ApprovalReview({
   const [unavailable, setUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
+  const { decideApproval } = useRun();
 
   async function decide(decision: "approved" | "rejected") {
     if (inFlight.current || accepted || unavailable || !approval ||
@@ -296,32 +294,10 @@ function ApprovalReview({
     setSubmitting(decision);
     setError(null);
     try {
-      const response = await fetch(
-        `/api/workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(runId)}/approval`,
-        {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ nodeId: message.nodeId, decision }),
-        }
-      );
-      const json = (await response.json()) as { error?: string; runId?: string; status?: string };
-      if (!response.ok) {
-        if (response.status === 410) setUnavailable(true);
-        throw new Error(
-          json.error ??
-          (response.status === 409
-            ? "This run is busy or the decision was already submitted. Wait for the trace to update."
-            : response.status === 410
-              ? "This approval expired or is no longer available. Start a new run."
-              : `Could not submit the decision (${response.status}).`)
-        );
-      }
-      if (json.runId !== runId || json.status !== "running") {
-        throw new Error("Unexpected response. Check the run trace before submitting again.");
-      }
+      await decideApproval(runId, message.nodeId, decision);
       setAccepted(true);
     } catch (cause) {
+      if (cause instanceof RunRequestError && cause.status === 410) setUnavailable(true);
       setError(cause instanceof Error ? cause.message : "Could not submit the decision.");
     } finally {
       inFlight.current = false;
@@ -481,7 +457,7 @@ function TraceNode({
         ) : null}
 
         {message.nodeType === "approval" ? (
-          <ApprovalReview key={`${runId}-${message.nodeId}`} message={message} workflowId={workflowId} runId={runId} />
+          <ApprovalReview key={`${runId}-${message.nodeId}`} message={message} runId={runId} />
         ) : null}
 
         {message.nodeType === "http" && (message.httpStatus !== undefined || message.output !== undefined) ? (
@@ -652,37 +628,8 @@ function RunTrace({ workflowId }: { workflowId: string }) {
 /*                                  Run list                                  */
 /* -------------------------------------------------------------------------- */
 
-function Viewers({ runId }: { runId: string }) {
-  const viewers = useOthers((others) =>
-    others
-      .filter((other) => other.presence.selectedRunId === runId)
-      .map((other) => other.info)
-  );
-
-  if (viewers.length === 0) {
-    return null;
-  }
-
-  return (
-    <span
-      className="flex -space-x-1"
-      title={viewers.map((v) => v.name).join(", ")}
-    >
-      {viewers.slice(0, 3).map((viewer, index) => (
-        <span
-          key={index}
-          className="size-2.5 rounded-full ring-1 ring-white"
-          style={{ background: viewer.color }}
-        />
-      ))}
-    </span>
-  );
-}
-
 function RunList() {
-  const { feeds, isLoading } = useFeeds();
-  const deleteFeed = useDeleteFeed();
-  const { selectedRunId, selectRun, messages } = useRun();
+  const { runs: storedRuns, runsLoading: isLoading, deleteRun: removeRun, selectedRunId, selectRun, messages } = useRun();
   const pendingExpiry = messages.reduce<number | undefined>(
     (earliest, message) =>
       message.status === "waiting" && message.approval && !message.approval.decision
@@ -694,15 +641,7 @@ function RunList() {
   const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const runs = useMemo(
-    () =>
-      [...(feeds ?? [])]
-        .sort(
-          (a, b) => Number(b.metadata.startedAt) - Number(a.metadata.startedAt)
-        )
-        .slice(0, MAX_RUNS),
-    [feeds]
-  );
+  const runs = useMemo(() => storedRuns.slice(0, MAX_RUNS), [storedRuns]);
 
   // Preview the newest run once, when the panel first loads. After that the
   // selection is the user's: exiting the preview must not re-select a run.
@@ -712,14 +651,14 @@ function RunList() {
     if (!didAutoSelect.current && runs.length > 0) {
       didAutoSelect.current = true;
       if (selectedRunId === null) {
-        selectRun(runs[0].feedId);
+        selectRun(runs[0].runId);
       }
     }
   }, [runs, selectedRunId, selectRun]);
 
   async function deleteRun(runId: string) {
     if (deletingRunId !== null) return;
-    const run = runs.find((item) => item.feedId === runId);
+    const run = runs.find((item) => item.runId === runId);
     if (!run || run.metadata.status === "running" ||
         (run.metadata.status === "waiting" && !(selectedRunId === runId && selectedExpired))) return;
 
@@ -730,7 +669,7 @@ function RunList() {
     }
 
     try {
-      await deleteFeed(runId);
+      await removeRun(runId);
     } catch {
       setDeleteError("Couldn't delete this run. Try again.");
     } finally {
@@ -756,12 +695,12 @@ function RunList() {
       )}
       <ul className="flex flex-col gap-1">
         {runs.map((run) => {
-          const selected = run.feedId === selectedRunId;
-          const deleting = run.feedId === deletingRunId;
+          const selected = run.runId === selectedRunId;
+          const deleting = run.runId === deletingRunId;
 
           return (
             <li
-              key={run.feedId}
+              key={run.runId}
               className={`run-list-item flex items-center rounded-md border ${
                 selected
                   ? "border-violet-200 bg-violet-50/70"
@@ -771,7 +710,7 @@ function RunList() {
               <button
                 type="button"
                 // Clicking the selected run again exits the preview.
-                onClick={() => selectRun(selected ? null : run.feedId)}
+                onClick={() => selectRun(selected ? null : run.runId)}
                 title={selected ? "Exit run preview" : "Preview this run"}
                 aria-pressed={selected}
                 disabled={deleting}
@@ -805,12 +744,11 @@ function RunList() {
                       : ""}
                   </span>
                 </span>
-                <Viewers runId={run.feedId} />
               </button>
               <button
                 type="button"
                 className="icon-button run-delete-button mr-1 shrink-0"
-                onClick={() => void deleteRun(run.feedId)}
+                onClick={() => void deleteRun(run.runId)}
                 disabled={deletingRunId !== null || run.metadata.status === "running" ||
                   (run.metadata.status === "waiting" && !(selected && selectedExpired))}
                 data-deleting={deleting || undefined}
@@ -889,7 +827,7 @@ function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
   const nodes = useNodes<WorkflowNode>();
   const edges = useEdges();
   const inputNode = useNodesData<WorkflowNode>(INPUT_NODE_ID);
-  const { selectRun } = useRun();
+  const { startRun } = useRun();
   const [input, setInput] = useState<string | null>(null);
   const [isStarting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1048,28 +986,11 @@ function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
     setError(null);
 
     try {
-      const response = await fetch(
-        `/api/workflows/${encodeURIComponent(workflow.workflowId)}/runs`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            input: value,
-            trigger: "test",
-            ...(hasLlm && question.trim() ? { question } : {}),
-          }),
-        }
-      );
-      const json = (await response.json()) as {
-        runId?: string;
-        error?: string;
-      };
-
-      if (!response.ok || !json.runId) {
-        throw new Error(json.error ?? `Request failed (${response.status})`);
-      }
-
-      selectRun(json.runId);
+      await startRun({
+        input: value,
+        trigger: "test",
+        ...(hasLlm && question.trim() ? { question } : {}),
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start run");
     } finally {
@@ -1390,7 +1311,7 @@ function ApiTab({ workflow }: { workflow: WorkflowSummary }) {
             <code className="rounded bg-neutral-100 px-1">WORKFLOW_API_TOKEN</code>.
             Configure the same secret on this application and the calling service.
             Never put it in browser code. The token permits runs within this private
-            workspace, not editing or Liveblocks access.
+            workspace, not editing, run history or backups.
           </p>
           <ul className="flex flex-col gap-1.5 leading-relaxed">
             <li>

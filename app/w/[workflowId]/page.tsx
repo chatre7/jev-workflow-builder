@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { WorkflowApp } from "../../workflow/workflow-app";
 import { requirePrincipal } from "../../workflow/server/auth";
-import { getRoomId, getWorkflow } from "../../workflow/server/liveblocks";
+import { getWorkflow, getWorkflowGraph } from "../../workflow/server/store";
 
 export const dynamic = "force-dynamic";
 
@@ -13,15 +13,17 @@ export default async function WorkflowPage({
   const { workflowId } = await params;
   const principal = await requirePrincipal();
   const workflow = await getWorkflow(workflowId, principal);
+  const stored = workflow ? await getWorkflowGraph(workflowId, principal) : null;
 
-  if (!workflow) {
+  if (!workflow || !stored) {
     notFound();
   }
 
   return (
     <WorkflowApp
-      roomId={getRoomId(workflowId)}
       workflow={workflow}
+      initialGraph={stored.graph}
+      initialVersion={stored.version}
     />
   );
 }

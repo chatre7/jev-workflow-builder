@@ -2,7 +2,7 @@ import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
 import { getRedis, getRedisConfigurationError } from "./redis";
-import { getWorkspaceId } from "./liveblocks";
+import { getWorkspaceId } from "./store";
 import { MAX_RUN_LLM_OUTPUT_TOKENS } from "./execution-policy";
 import { ApiError } from "./request-security";
 

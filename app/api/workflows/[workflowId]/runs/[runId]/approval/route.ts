@@ -2,7 +2,8 @@ import { after, NextRequest, NextResponse } from "next/server";
 import { getPrincipal } from "../../../../../../workflow/server/auth";
 import { assertApprovalPending, claimApproval } from "../../../../../../workflow/server/approvals";
 import { resumeWorkflowRun } from "../../../../../../workflow/server/executor";
-import { getLiveblocks, getRoomId, getWorkflow } from "../../../../../../workflow/server/liveblocks";
+import { getRoomId, getRunMetadata, getWorkflow } from "../../../../../../workflow/server/store";
+import { createRunEventStream } from "../../../../../../workflow/server/sse";
 import { acquireRunLease } from "../../../../../../workflow/server/run-admission";
 import { ApiError, assertSameOrigin, readJsonObject } from "../../../../../../workflow/server/request-security";
 import { boundedOperation, STORAGE_TIMEOUT_MS } from "../../../../../../workflow/server/execution-policy";
@@ -10,13 +11,11 @@ import { boundedOperation, STORAGE_TIMEOUT_MS } from "../../../../../../workflow
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-async function readApprovalToken(roomId: string, runId: string): Promise<string> {
-  const feed = await boundedOperation(
-    (signal) => getLiveblocks().getFeed({ roomId, feedId: runId }, { signal }),
-    STORAGE_TIMEOUT_MS
-  );
-  if (feed.metadata.status !== "waiting") throw new ApiError(409, "This run is no longer waiting for approval.");
-  const expectedToken = feed.metadata.approvalToken;
+async function readApprovalToken(workflowId: string, runId: string): Promise<string> {
+  const metadata = await boundedOperation(() => getRunMetadata(workflowId, runId), STORAGE_TIMEOUT_MS);
+  if (!metadata) throw new ApiError(404, "Run not found.");
+  if (metadata.status !== "waiting") throw new ApiError(409, "This run is no longer waiting for approval.");
+  const expectedToken = metadata.approvalToken;
   if (typeof expectedToken !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(expectedToken)) {
     throw new ApiError(410, "This approval checkpoint is unavailable.");
   }
@@ -48,7 +47,9 @@ export async function POST(
     const roomId = getRoomId(workflowId);
     // Feed publication alone outlives Redis TTL expiry. Check the authoritative
     // checkpoint before nonrefundable admission, without consuming it.
-    const expectedToken = await readApprovalToken(roomId, runId);
+    const flag = (name: string) => ["1", "true"].includes(request.nextUrl.searchParams.get(name) ?? "");
+    const stream = flag("stream") ? createRunEventStream() : undefined;
+    const expectedToken = await readApprovalToken(workflowId, runId);
     await assertApprovalPending({
       roomId, runId, nodeId: body.nodeId, decision: body.decision, actorId: principal.id, expectedToken,
     });
@@ -63,18 +64,29 @@ export async function POST(
     }
     let run;
     try {
-      const expectedToken = await readApprovalToken(roomId, runId);
+      const expectedToken = await readApprovalToken(workflowId, runId);
       const claim = await claimApproval({
         roomId, runId, nodeId: body.nodeId, decision: body.decision, actorId: principal.id, expectedToken,
       });
-      run = resumeWorkflowRun(claim);
+      run = resumeWorkflowRun(claim, stream?.emit);
     } catch (error) {
       await lease.release();
       throw error;
     }
     // A waiting phase resolves promptly: no lease or hosting timer spans human time.
     const trace = run.trace$.finally(() => lease.release());
-    if (["1", "true"].includes(request.nextUrl.searchParams.get("wait") ?? "")) {
+    if (stream) {
+      stream.start(run.runId);
+      after(async () => {
+        try {
+          stream.finish(await trace);
+        } catch {
+          stream.fail("Workflow approval resume failed.");
+        }
+      });
+      return stream.response();
+    }
+    if (flag("wait")) {
       const result = await trace;
       return NextResponse.json(result, {
         status: result.status === "error" ? 500 : 200,

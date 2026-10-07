@@ -3,7 +3,8 @@ https://github.com/user-attachments/assets/7564c3be-77e2-4283-a5ad-88ff973a269b
 ## Jev workflow builder
 
 A private, single-owner Jev/LLM workflow builder using Next.js, React Flow,
-Liveblocks, password authentication, and shared Redis admission.
+password authentication, and Upstash Redis for storage, run history and
+admission.
 
 ### Set up
 
@@ -15,12 +16,12 @@ Liveblocks, password authentication, and shared Redis admission.
    HTTPS is required outside localhost. Generate a separate random
    `NEXTAUTH_SECRET` of at least 32 characters, for example:
    `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`.
-5. Set `LIVEBLOCKS_SECRET_KEY` from the
-   [Liveblocks dashboard](https://liveblocks.io/dashboard/apikeys).
-6. Create an [Upstash Redis](https://upstash.com/) database and set its
+5. Create an [Upstash Redis](https://upstash.com/) database and set its
    `UPSTASH_REDIS_REST_URL` (HTTPS) and `UPSTASH_REDIS_REST_TOKEN`.
-   Redis is required for sign-in and every run, including mock AI runs. There is
-   no unrestricted in-memory fallback when Redis is unavailable.
+   Redis stores workflows and run history and is required for sign-in and
+   every run, including mock AI runs. There is no unrestricted in-memory
+   fallback when Redis is unavailable.
+6. There is no other storage service to configure.
 7. Optionally set `OPENROUTER_API_KEY` for both Jev and LLM nodes. Create it at
    [OpenRouter API keys](https://openrouter.ai/settings/keys) and ensure the
    account/key can pay for the selected model. No separate TypeSafe or Vercel
@@ -34,24 +35,18 @@ Liveblocks, password authentication, and shared Redis admission.
 8. Optionally configure the HTTP connections and document catalog described below.
 9. Run `npm run dev`, sign in with your owner password, and create a workflow.
 
-Keep the `@liveblocks/*` dependencies pinned to the same compatible version when
-upgrading. `@liveblocks/react-flow` pins its React integration exactly; a second
-installed `@liveblocks/react` instance gives its hooks a different room context
-and breaks the editor even when the build succeeds.
-
 The owner accesses **one private workspace** from any signed-in device.
 `WORKFLOW_WORKSPACE_ID` selects that workspace
 on the server (default `private`), never from a URL parameter. Keep its value
-stable, and use distinct values or separate Liveblocks projects for unrelated
+stable, and use distinct values or separate Redis databases for unrelated
 deployments. Cookie-authenticated mutations must originate from `NEXTAUTH_URL`.
 
 Missing authentication configuration locks private functionality rather than
 enabling anonymous access. Sign-out is available in the workspace header.
 Sessions last eight hours. Changing `OWNER_PASSWORD` and restarting/redeploying
 invalidates existing application sessions; old GitHub sessions are not accepted.
-Already-issued Liveblocks tokens/connections remain subject to Liveblocks' own
-expiration/revocation. Keep the owner password separate from `NEXTAUTH_SECRET`
-and `WORKFLOW_API_TOKEN`.
+Keep the owner password separate from `NEXTAUTH_SECRET` and
+`WORKFLOW_API_TOKEN`.
 
 Sign-in accepts at most **10 attempts per minute per deployment origin**, shared
 across all instances and including successful attempts. This deliberately does
@@ -327,8 +322,8 @@ checkpoint expires or another decision wins after the preflight check.
 Claims atomically consume the resumable snapshot before execution. If a claimed
 resume is interrupted, it stays consumed and is **not automatically replayed**.
 Verify external side effects before starting a new run. A checkpoint-save failure
-fails closed; a phase token is published to the private feed only after Redis
-acknowledges the save. If feed publication fails, the durable checkpoint may be
+fails closed; a phase token is published to the run record only after Redis
+acknowledges the checkpoint save. If that publication fails, the checkpoint may be
 unavailable for approval rather than risking an unconfirmed resume. This is not
 an exactly-once transaction with external APIs.
 
@@ -366,7 +361,7 @@ characters; resolved queries and outputs are bounded to 32,000 characters.
 
 ### Backup: export and import
 
-Workflows live only in Liveblocks Storage. Download backups regularly and keep
+Workflows live only in the Redis database. Download backups regularly and keep
 them outside the deployment.
 
 - **One workflow:** the download button in the workflow header saves
@@ -488,20 +483,32 @@ error finalization. The conservative preview cutoff uses the cumulative feed
 budget, including across approval pauses; resuming does not replenish it. Final
 node outputs are still recorded after previews stop.
 
-### Existing public demo data
+### Storage and live progress
 
-New rooms use `jev:workflows:<workspace>:<workflowId>`, private default access,
-and checked application/workspace metadata. They do not match the old
-`liveblocks:examples:*` wildcard. Legacy public rooms are **not automatically
-adopted, migrated, or deleted** and will not appear in the private workspace.
-Create private workflows again after deployment. Back up and retire old public
-rooms separately; for a previously public installation, a separate Liveblocks
-project provides the clearest separation from existing access grants.
+Everything is stored in Redis under `jev:store:{<workspace hash>}:…`: a hash
+per workflow (name, timestamps, a version counter and the graph JSON), a sorted
+set of workflow IDs, a sorted set of run IDs per workflow, and a hash per run
+holding its metadata and one entry per executed node. The newest 50 runs per
+workflow are kept; older runs are deleted when a new one starts. Nothing
+expires on its own.
 
-The optional local Liveblocks dev server does not implement every production
-API, and some versions ignore room metadata or stub feeds. Such rooms are
-intentionally rejected by the authorization checks; do not disable those checks
-to make a local stub appear production-equivalent.
+The canvas saves automatically about a second after the last edit. Each save
+carries the version it was based on; if another tab saved first, the server
+answers 409 and the editor reloads that newer graph instead of overwriting it.
+The header shows the save state, and the browser warns before leaving with
+unsaved edits. Undo/redo is local to the tab.
+
+The tab that starts a run (or submits an approval) receives Server-Sent Events
+(`?stream=true` on the run and approval routes): a `start` frame with the run
+ID, then `run` and `node` frames as the executor writes them, then `done` with
+the final trace. Any other tab polls the run store once a second for the
+selected run while it is running, and the run list every four seconds while
+any run is active. The stored trace is authoritative: when a stream ends, the
+tab reloads the run from the store.
+
+Moving from an earlier Liveblocks-backed deployment: export every workflow from
+the old deployment (workflow list → download), deploy this version, sign in,
+and import the file. Run history does not migrate.
 
 ### Verification
 
@@ -534,7 +541,7 @@ docker stop jev-security-redis
 ```
 
 `TEST_REDIS_CONTAINER` may select another disposable test container. Do not run
-the suite against production Redis. No real AI or Liveblocks credentials are
+the suite against production Redis. No real AI or storage credentials are
 needed for the regression suites; live cloud/provider verification requires
 deployment credentials.
 

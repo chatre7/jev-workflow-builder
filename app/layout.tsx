@@ -1,7 +1,5 @@
 import type { Metadata } from "next";
 import "@xyflow/react/dist/style.css";
-import "@liveblocks/react-ui/styles.css";
-import "@liveblocks/react-flow/styles.css";
 import "./globals.css";
 import { Suspense } from "react";
 

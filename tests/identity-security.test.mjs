@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createModuleLoader } from "./load-module.mjs";
+import { createFakeRedis } from "./fake-redis.mjs";
 
 const member = { id: "owner", name: "Owner", avatar: "", color: "#7654cb" };
 const configured = {
@@ -9,7 +10,7 @@ const configured = {
   NEXTAUTH_URL: "https://workflow.example",
   UPSTASH_REDIS_REST_URL: "https://redis.example",
   UPSTASH_REDIS_REST_TOKEN: "local-redis-token",
-  LIVEBLOCKS_SECRET_KEY: "sk_localdev", WORKFLOW_WORKSPACE_ID: "team-a",
+  WORKFLOW_WORKSPACE_ID: "team-a",
 };
 
 test("owner sign-in rejects wrong passwords, forged updates and obsolete sessions", async () => {
@@ -69,68 +70,28 @@ test("password guessing is throttled and Redis failure cannot allow sign-in", as
   await assert.rejects(authorize({ password: configured.OWNER_PASSWORD }));
 });
 
-test("private storage rejects public, legacy, wrong-workspace and mismatched-ID rooms", async () => {
-  const id = "workflow123";
-  const room = {
-    id: `jev:workflows:team-a:${id}`, defaultAccesses: [],
-    metadata: { app: "jev-workflows", workspaceId: "team-a", workflowId: id, name: "Private" },
-    createdAt: new Date(0).toISOString(), lastConnectionAt: null,
-  };
-  let returned = room;
-  let fail = false;
-  const load = createModuleLoader({ env: { ...configured }, stubs: {
-    "@liveblocks/node": {
-      LiveblocksError: class extends Error {},
-      Liveblocks: class {
-        async getRoom() { if (fail) throw new Error("Provider unavailable"); return returned; }
-        async getRooms() { return { data: [returned] }; }
-      },
-    },
-    "@liveblocks/react-flow/node": { mutateFlow: () => { throw new Error("Not used"); } },
-    nanoid: { nanoid: () => "generated123" },
-  } });
-  const storage = await load("app/workflow/server/liveblocks.ts");
-  assert.equal((await storage.getWorkflow(id, member)).name, "Private");
-  await assert.rejects(storage.getWorkflow(id, null), /Authentication/);
-  for (const altered of [
-    { ...room, defaultAccesses: ["room:write"] },
-    { ...room, id: `liveblocks:examples:old:${id}` },
-    { ...room, metadata: { ...room.metadata, workspaceId: "team-b" } },
-    { ...room, metadata: { ...room.metadata, workflowId: "different123" } },
-    { ...room, metadata: { ...room.metadata, app: "other-app" } },
-  ]) {
-    returned = altered;
-    assert.equal(await storage.getWorkflow(id, member), null);
-    assert.equal((await storage.listWorkflows(member)).length, 0);
-  }
-  fail = true;
-  await assert.rejects(storage.getWorkflow(id, member), /Provider unavailable/);
+test("workspace storage is isolated by key, rejects anonymous callers, and ignores unknown or corrupt records", async () => {
+  const redis = createFakeRedis();
+  const open = (workspace) => createModuleLoader({ env: { ...configured, WORKFLOW_WORKSPACE_ID: workspace }, stubs: {
+    "@upstash/redis": { Redis: redis.Redis },
+    "./auth": { getPrincipal: async () => null },
+    nanoid: { nanoid: () => `generated${workspace.length}${redis.calls.length}` },
+  } })("app/workflow/server/store.ts");
+  const a = await open("team-a");
+  const b = await open("team-b");
+  const created = await a.createWorkflow(member, { name: "Private" });
+  assert.equal((await a.getWorkflow(created.workflowId, member)).name, "Private");
+  await assert.rejects(a.getWorkflow(created.workflowId, null), /Authentication/);
+  // The same ID is invisible from another workspace, and its list is empty.
+  assert.equal(await b.getWorkflow(created.workflowId, member), null);
+  assert.deepEqual([...await b.listWorkflows(member)], []);
+  assert.equal((await a.listWorkflows(member)).length, 1);
+  assert.equal(await a.getWorkflow("missing-workflow", member), null);
+  assert.equal(await a.getWorkflow("../etc/passwd", member), null);
+  // A record without timestamps is not a workflow.
+  const key = [...redis.hashes.keys()].find((entry) => entry.endsWith(`:wf:${created.workflowId}`));
+  redis.hashes.get(key).delete("createdAt");
+  assert.equal(await a.getWorkflow(created.workflowId, member), null);
+  assert.deepEqual([...await a.listWorkflows(member)], []);
 });
 
-test("room-token endpoint rejects anonymous and cross-workspace access before authorizing", async () => {
-  let principal = null;
-  let issued = 0;
-  const id = "workflow123";
-  const room = `jev:workflows:team-a:${id}`;
-  const load = createModuleLoader({ env: { ...configured }, stubs: {
-    "next/server": { NextResponse: Response },
-    "../../workflow/server/auth": { getAuthConfigurationError: () => null, getPrincipal: async () => principal },
-    "./auth": { getPrincipal: async () => principal },
-    "../../workflow/server/liveblocks": {
-      getLiveblocksConfigurationError: () => null, getWorkspaceId: () => "team-a",
-      getWorkflow: async workflowId => workflowId === id ? { workflowId } : null,
-      getLiveblocks: () => ({ prepareSession() { issued++; throw new Error("Should never authorize rejected requests"); } }),
-    },
-    nanoid: { nanoid: () => "unused" },
-  } });
-  const route = await load("app/api/liveblocks-auth/route.ts");
-  const request = target => new Request("https://workflow.example/api/liveblocks-auth", {
-    method: "POST", headers: { "content-type": "application/json", origin: "https://workflow.example" },
-    body: JSON.stringify({ room: target, userId: "forged-owner" }),
-  });
-  assert.equal((await route.POST(request(room))).status, 401);
-  principal = member;
-  assert.equal((await route.POST(request(`jev:workflows:team-b:${id}`))).status, 404);
-  assert.equal((await route.POST(request(`liveblocks:examples:any:${id}`))).status, 404);
-  assert.equal(issued, 0);
-});

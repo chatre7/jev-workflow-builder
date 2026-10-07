@@ -6,15 +6,15 @@ import {
   getPrincipal,
 } from "./workflow/server/auth";
 import {
-  getLiveblocksConfigurationError,
+  getStoreConfigurationError,
   listWorkflows,
-} from "./workflow/server/liveblocks";
+} from "./workflow/server/store";
 
 export const dynamic = "force-dynamic";
 
 export default async function Page() {
   const configurationError =
-    getAuthConfigurationError() ?? getLiveblocksConfigurationError();
+    getAuthConfigurationError() ?? getStoreConfigurationError();
   const principal = configurationError ? null : await getPrincipal();
 
   if (!principal) {

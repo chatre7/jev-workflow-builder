@@ -1,19 +1,6 @@
 "use client";
 
 import {
-  useCanRedo,
-  useCanUndo,
-  useRedo,
-  useUndo,
-  useUser,
-} from "@liveblocks/react";
-import {
-  Cursors,
-  useLiveblocksFlow,
-  type CursorsCursorProps,
-} from "@liveblocks/react-flow";
-import { Cursor } from "@liveblocks/react-ui";
-import {
   Background,
   BackgroundVariant,
   ConnectionLineType,
@@ -55,11 +42,11 @@ import {
   useState,
   type ComponentProps,
 } from "react";
+import { useGraph } from "./graph-context";
 import { NODE_WIDTH, nodeTypes } from "./nodes";
 import { useApprovalExpired, useRun } from "./run-context";
 import {
   ANY_HANDLE,
-  FLOW_STORAGE_KEY,
   IN_HANDLE,
   WORKFLOW_EDGE_TYPE,
   createConditionNode,
@@ -81,16 +68,6 @@ import {
   type WorkflowNode,
   type WorkflowNodeType,
 } from "./shared";
-
-function FlowCursor({ userId }: CursorsCursorProps) {
-  const { user, isLoading } = useUser(userId);
-
-  if (isLoading) {
-    return null;
-  }
-
-  return <Cursor color={user?.color} label={user?.name} />;
-}
 
 /**
  * Shown while a run is previewed on the canvas. Exiting returns the canvas to
@@ -160,17 +137,8 @@ function Toast({ message }: { message: string | null }) {
 export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
   const reactFlow = useReactFlow<WorkflowNode, WorkflowEdge>();
   const { results, selectedRunId, selectRun } = useRun();
-  const undo = useUndo();
-  const redo = useRedo();
-  const canUndo = useCanUndo();
-  const canRedo = useCanRedo();
+  const { nodes, edges, onNodesChange, onEdgesChange, undo, redo, canUndo, canRedo, notice, dismissNotice } = useGraph();
   const [toast, setToast] = useState<string | null>(null);
-
-  const { nodes, edges, onNodesChange, onEdgesChange, onDelete } =
-    useLiveblocksFlow<WorkflowNode, WorkflowEdge>({
-      suspense: true,
-      storageKey: FLOW_STORAGE_KEY,
-    });
 
   useEffect(() => {
     if (!toast) {
@@ -393,7 +361,6 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={handleConnect}
-        onDelete={onDelete}
         isValidConnection={isValidConnection}
         nodeTypes={nodeTypes}
         defaultEdgeOptions={{
@@ -411,7 +378,6 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
         proOptions={{ hideAttribution: true }}
         deleteKeyCode={["Backspace", "Delete"]}
       >
-        <Cursors components={{ Cursor: FlowCursor }} />
         <Background
           variant={BackgroundVariant.Dots}
           gap={24}
@@ -575,6 +541,14 @@ export function WorkflowEditor({ className, ...props }: ComponentProps<"div">) {
         </Panel>
         <Panel position="top-center">
           <Toast message={toast} />
+          {notice ? (
+            <div role="alert" className="mt-2 flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900 shadow-lg ring-1 ring-amber-200">
+              <span>{notice}</span>
+              <button type="button" onClick={dismissNotice} className="rounded px-1 font-medium hover:bg-amber-100" aria-label="Dismiss">
+                <X className="size-3.5" />
+              </button>
+            </div>
+          ) : null}
         </Panel>
       </ReactFlow>
     </div>

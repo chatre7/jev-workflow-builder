@@ -75,8 +75,8 @@ test("run endpoint denies before side effects and fails closed when shared quota
       nanoid: { nanoid: () => "test-id" },
       "./auth": { getPrincipal: async () => principal },
       "next/server": { NextResponse: Response, after: () => {} },
-      "../../../../workflow/server/liveblocks": {
-        getWorkflow: async () => ({ workflowId: "test" }), getRoomId: () => "private-room",
+      "../../../../workflow/server/store": {
+        getWorkflow: async () => ({ workflowId: "test" }), getRoomId: () => "private-room", listRuns: async () => [],
         readWorkflowGraph: async () => { throw new Error("No question should not pre-read graph"); },
       },
       "../../../../workflow/server/run-admission": {
@@ -112,8 +112,8 @@ test("run questions reject invalid types, UTF-16 overflow and unreachable LLMs b
       nanoid: { nanoid: () => `id${++serial}` },
       "./auth": { getPrincipal: async () => member },
       "next/server": { NextResponse: Response, after: () => {} },
-      "../../../../workflow/server/liveblocks": {
-        getWorkflow: async () => ({ workflowId: "test" }), getRoomId: () => "private-room",
+      "../../../../workflow/server/store": {
+        getWorkflow: async () => ({ workflowId: "test" }), getRoomId: () => "private-room", listRuns: async () => [],
         readWorkflowGraph: async () => { reads++; return graph; },
       },
       "../../../../workflow/server/run-admission": {

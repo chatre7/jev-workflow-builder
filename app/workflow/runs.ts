@@ -132,6 +132,34 @@ export type NodeResultData = {
   startedAt: number;
 };
 
+/**
+ * Stored run metadata. Values are strings so one Redis hash holds both the
+ * metadata and the per-node traces; timestamps are ms as decimal strings.
+ */
+export type RunMetadata = {
+  status: RunStatus;
+  trigger: RunTrigger;
+  // The text the run started with, truncated for display in the run list.
+  input: string;
+  // Optional short preview; the input message retains the complete question.
+  question?: string;
+  startedAt: string;
+  completedAt?: string;
+  error?: string;
+  // Published only after a durable approval checkpoint is acknowledged.
+  approvalToken?: string;
+  // Provider-reported usage so far. `cost` (USD) is set only when every AI
+  // call in the run reported its own cost.
+  inputTokens?: string;
+  outputTokens?: string;
+  cost?: string;
+};
+
+/** Live progress of one run, as streamed to the request that started it. */
+export type RunEvent =
+  | { type: "run"; metadata: RunMetadata }
+  | { type: "node"; data: NodeResultData };
+
 export type RunSummary = {
   runId: string;
   status: RunStatus;

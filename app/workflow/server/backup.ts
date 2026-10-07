@@ -1,9 +1,9 @@
 import "server-only";
 
-import type { WorkflowEdge, WorkflowNode } from "../shared";
+import { toStoredGraph, type WorkflowEdge, type WorkflowNode } from "../shared";
 import type { Principal } from "./auth";
-import { ExecutionError, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, checkLimit, jsonSize } from "./execution-policy";
-import { MAX_GRAPH_STORAGE_CHARS, validateWorkflowGraph } from "./execution-validation";
+import { ExecutionError, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_GRAPH_STORAGE_CHARS, checkLimit, jsonSize } from "./execution-policy";
+import { validateWorkflowGraph } from "./execution-validation";
 import {
   createWorkflow,
   getRoomId,
@@ -11,7 +11,7 @@ import {
   listWorkflows,
   readWorkflowGraph,
   type WorkflowSummary,
-} from "./liveblocks";
+} from "./store";
 
 export const BACKUP_FORMAT = "jev-workflow-backup";
 export const BACKUP_VERSION = 1;
@@ -38,25 +38,7 @@ export type WorkflowBackup = {
 
 export type WorkflowGraph = { nodes: WorkflowNode[]; edges: WorkflowEdge[] };
 
-/** Keeps the saved shape only: layout, type and data. React Flow runtime state is dropped. */
-export function serializeGraph(graph: WorkflowGraph): WorkflowGraph {
-  return {
-    nodes: graph.nodes.map((node) => ({
-      id: node.id,
-      type: node.type,
-      position: { x: node.position.x, y: node.position.y },
-      data: node.data,
-    }) as WorkflowNode),
-    edges: graph.edges.map((edge) => ({
-      id: edge.id,
-      type: edge.type,
-      source: edge.source,
-      sourceHandle: edge.sourceHandle,
-      target: edge.target,
-      ...(edge.targetHandle === undefined || edge.targetHandle === null ? {} : { targetHandle: edge.targetHandle }),
-    }) as WorkflowEdge),
-  };
-}
+export const serializeGraph = toStoredGraph;
 
 function backup(workflows: ExportedWorkflow[]): WorkflowBackup {
   return { format: BACKUP_FORMAT, version: BACKUP_VERSION, exportedAt: new Date().toISOString(), workflows };

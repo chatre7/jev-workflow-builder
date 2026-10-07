@@ -19,7 +19,7 @@ function loader(workspace) {
   return createModuleLoader({
     env: { UPSTASH_REDIS_REST_URL: "https://local-redis.test", UPSTASH_REDIS_REST_TOKEN: "local-only" },
     stubs: {
-      "./liveblocks": { getWorkspaceId: () => workspace },
+      "./store": { getWorkspaceId: () => workspace },
       "./auth": { getPrincipal: async () => null },
       "./execution-policy": { MAX_RUN_LLM_OUTPUT_TOKENS: 25 * 2048 },
       "@upstash/redis": { Redis: class {
@@ -77,7 +77,7 @@ test("a Redis outage never falls back to unrestricted in-process admission", asy
   const load = createModuleLoader({
     env: { UPSTASH_REDIS_REST_URL: "https://local-redis.test", UPSTASH_REDIS_REST_TOKEN: "local-only" },
     stubs: {
-      "./liveblocks": { getWorkspaceId: () => "test" },
+      "./store": { getWorkspaceId: () => "test" },
       "./auth": { getPrincipal: async () => null },
       "./execution-policy": { MAX_RUN_LLM_OUTPUT_TOKENS: 51200 },
       "@upstash/redis": { Redis: class { async eval() { throw new Error("Unavailable"); } } },

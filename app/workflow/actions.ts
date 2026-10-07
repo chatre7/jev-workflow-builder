@@ -7,7 +7,7 @@ import {
   listWorkflows,
   renameWorkflow,
   type WorkflowSummary,
-} from "./server/liveblocks";
+} from "./server/store";
 
 export async function createWorkflowAction(): Promise<void> {
   const workflow = await createWorkflow(await requirePrincipal(), {
