@@ -359,6 +359,36 @@ ASCII ID (96 characters), title (160), text (8,000), and optional credential-fre
 HTTPS URL (2,048). Unknown fields are rejected. Excerpts are at most 600
 characters; resolved queries and outputs are bounded to 32,000 characters.
 
+### Ready-to-import sample workflows
+
+[`examples/sample-workflows.json`](examples/sample-workflows.json) contains
+**11 workflows** covering every node kind: CSV parsing, Table aggregation,
+Condition routing, typed Transform mapping, parallel branches with an `all`
+join, HTTP requests, human Approval, Knowledge Search, LLM text, LLM structured
+JSON, and Jev choice/score/noul questions. Each Input includes synthetic sample
+data. Approval examples only route data; they do not issue payments or refunds.
+
+Enable the demo services in `.env.local` before importing the complete pack.
+Merge `public-demo` into any existing HTTP connection map rather than replacing
+other connections:
+
+```dotenv
+WORKFLOW_HTTP_CONNECTIONS='{"public-demo":{"baseUrl":"https://jsonplaceholder.typicode.com/","methods":["GET"]}}'
+WORKFLOW_KNOWLEDGE_FILE=examples/knowledge.json
+```
+
+Restart the server, sign in, and use **Import a backup file as new workflows**
+on the workflow list to select the sample file. Import creates new copies; it
+does not overwrite existing workflows. Open a sample and select **Run**. For
+Approval, select **Approve** or **Reject** after the run reaches `waiting`.
+Knowledge uses the bundled illustrative DEMO policies, not real business rules.
+
+The three AI examples need a valid `OPENROUTER_API_KEY` for real execution:
+LLM text uses `liquid/lfm-2.5-2.6b:free`, structured extraction uses the paid
+`openai/gpt-5.4-mini`, and Jev uses the paid `typesafe/jev-1.13`. Provider access,
+credits, availability, and application run quotas still apply. The backup
+contains no credentials, run history, or approval checkpoints.
+
 ### Backup: export and import
 
 Workflows live only in the Redis database. Download backups regularly and keep
