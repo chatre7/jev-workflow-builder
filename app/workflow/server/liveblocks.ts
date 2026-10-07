@@ -160,7 +160,12 @@ function validateWorkflowName(name: string): string {
 
 export async function createWorkflow(
   principal: Principal,
-  options: { name?: string; seedDemo?: boolean } = {}
+  options: {
+    name?: string;
+    seedDemo?: boolean;
+    // Already validated by the caller (backup import); never raw client input.
+    graph?: { nodes: WorkflowNode[]; edges: WorkflowEdge[] };
+  } = {}
 ): Promise<WorkflowSummary> {
   assertPrincipal(principal);
   const workflowId = nanoid(10);
@@ -180,8 +185,8 @@ export async function createWorkflow(
     },
   });
 
-  const { nodes, edges } =
-    options.seedDemo === true ? createDemoWorkflow() : { nodes: [], edges: [] };
+  const { nodes, edges } = options.graph
+    ?? (options.seedDemo === true ? createDemoWorkflow() : { nodes: [], edges: [] });
   await mutateFlow<WorkflowNode, WorkflowEdge>(
     { client: liveblocks, roomId, storageKey: FLOW_STORAGE_KEY },
     (flow) => {

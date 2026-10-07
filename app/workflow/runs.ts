@@ -57,6 +57,43 @@ export type ApprovalDetails = {
 };
 
 /**
+ * Provider-reported usage for one AI call. Tokens come from every provider;
+ * `cost` (USD) is present only when the provider itself states it. Nothing is
+ * estimated from a price table.
+ */
+export type NodeUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  cost?: number;
+};
+
+export type UsageTotals = NodeUsage & {
+  // Calls that reported usage, and how many of those also reported a cost.
+  calls: number;
+  costedCalls: number;
+};
+
+export function sumUsage(nodes: readonly { usage?: NodeUsage }[]): UsageTotals {
+  const totals: UsageTotals = { calls: 0, costedCalls: 0 };
+  for (const { usage } of nodes) {
+    if (!usage) continue;
+    totals.calls++;
+    if (usage.inputTokens !== undefined) totals.inputTokens = (totals.inputTokens ?? 0) + usage.inputTokens;
+    if (usage.outputTokens !== undefined) totals.outputTokens = (totals.outputTokens ?? 0) + usage.outputTokens;
+    if (usage.cost !== undefined) {
+      totals.costedCalls++;
+      totals.cost = (totals.cost ?? 0) + usage.cost;
+    }
+  }
+  return totals;
+}
+
+export function formatCost(cost: number): string {
+  if (cost === 0) return "$0";
+  return cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(2)}`;
+}
+
+/**
  * The data stored in one feed message: the result of executing one node.
  */
 export type NodeResultData = {
@@ -85,6 +122,7 @@ export type NodeResultData = {
   // Set when the node ran against a mock instead of a real provider.
   mock?: boolean;
   model?: string;
+  usage?: NodeUsage;
   httpStatus?: number;
   approval?: ApprovalDetails;
   csv?: { rowCount: number; columnCount: number; headers: boolean };
@@ -107,6 +145,8 @@ export type RunSummary = {
 
 export type RunTrace = RunSummary & {
   nodes: NodeResultData[];
+  // Summed over nodes that reported usage; absent when no node did.
+  usage?: UsageTotals;
   // Texts that reached each output input, with an empty array for unused inputs.
   output: WorkflowOutput;
 };

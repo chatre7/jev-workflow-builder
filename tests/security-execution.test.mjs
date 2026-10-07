@@ -980,3 +980,81 @@ test("internal callers cannot bypass question validation or silently ignore ques
   assert.equal(blank.question, undefined);
   assert.equal(blank.nodes.find((node) => node.nodeType === "input").question, undefined);
 });
+
+// Application modules run in a vm realm; compare structure, not prototypes.
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
+test("LLM usage records provider tokens and OpenRouter cost without estimating anything", async () => {
+  let settings;
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    streamText: (options) => {
+      settings = options.model.settings;
+      return {
+        textStream: (async function* () { yield "Reply."; })(),
+        totalUsage: Promise.resolve({ inputTokens: 120, outputTokens: 8, totalTokens: 128 }),
+        providerMetadata: Promise.resolve({ openrouter: { provider: "Test", usage: { promptTokens: 120, completionTokens: 8, totalTokens: 128, cost: 0.0001234 } } }),
+      };
+    },
+    clientOverrides: {},
+  });
+  h.setGraph(fixtures(h.shared));
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "private-room", input: "hello", trigger: "test" }).trace$;
+  assert.equal(trace.status, "complete");
+  assert.deepEqual(plain(settings), { usage: { include: true } });
+  const llm = trace.nodes.find((node) => node.nodeType === "llm");
+  assert.deepEqual(plain(llm.usage), { inputTokens: 120, outputTokens: 8, cost: 0.0001234 });
+  assert.deepEqual(plain(trace.usage), { calls: 1, costedCalls: 1, inputTokens: 120, outputTokens: 8, cost: 0.0001234 });
+  const metadata = h.events.at(-1).metadata;
+  assert.equal(metadata.inputTokens, "120");
+  assert.equal(metadata.outputTokens, "8");
+  assert.equal(metadata.cost, "0.0001234");
+});
+
+test("LLM usage tolerates providers without cost, rejected usage promises, and invalid values", async () => {
+  const { readLlmUsage } = await (await harness()).load("app/workflow/server/llm");
+  // Tokens only: another provider, or OpenRouter without accounting.
+  assert.deepEqual(plain(readLlmUsage({ inputTokens: 5, outputTokens: 7 }, undefined)), { inputTokens: 5, outputTokens: 7 });
+  assert.deepEqual(plain(readLlmUsage({ inputTokens: 5, outputTokens: undefined }, { anthropic: { cacheCreationInputTokens: 1 } })), { inputTokens: 5 });
+  assert.equal(readLlmUsage(undefined, undefined), undefined);
+  assert.equal(readLlmUsage({ inputTokens: -1, outputTokens: 1.5 }, { openrouter: { usage: { cost: -3 } } }), undefined);
+  assert.equal(readLlmUsage({ inputTokens: Infinity }, { openrouter: { usage: { cost: "0.5" } } }), undefined);
+  assert.deepEqual(plain(readLlmUsage({}, { openrouter: { usage: { cost: 0 } } })), { cost: 0 });
+
+  const h = await harness({
+    env: { OPENROUTER_API_KEY: "test-key" },
+    streamText: () => ({
+      textStream: (async function* () { yield "Reply."; })(),
+      totalUsage: Promise.reject(new Error("usage unavailable")),
+      providerMetadata: Promise.resolve(undefined),
+    }),
+  });
+  h.setGraph(fixtures(h.shared));
+  const { startWorkflowRun } = await h.load("app/workflow/server/executor");
+  const trace = await startWorkflowRun({ roomId: "private-room", input: "hello", trigger: "test" }).trace$;
+  assert.equal(trace.status, "complete");
+  assert.equal(trace.nodes.find((node) => node.nodeType === "llm").usage, undefined);
+  assert.equal(trace.usage, undefined);
+  assert.equal(h.events.at(-1).metadata.cost, undefined);
+
+  // Mocks never report usage, so a keyless run shows none.
+  const mock = await harness();
+  mock.setGraph(fixtures(mock.shared));
+  const mockRun = await (await mock.load("app/workflow/server/executor")).startWorkflowRun({ roomId: "private-room", input: "hello", trigger: "test" }).trace$;
+  assert.equal(mockRun.status, "complete");
+  assert.equal(mockRun.usage, undefined);
+});
+
+test("run usage totals mark calls that reported no cost instead of guessing", async () => {
+  const { sumUsage, formatCost } = await (await harness()).load("app/workflow/runs");
+  const totals = sumUsage([
+    { usage: { inputTokens: 10, outputTokens: 2, cost: 0.5 } },
+    { usage: { inputTokens: 3, outputTokens: 4 } },
+    {},
+  ]);
+  assert.deepEqual(plain(totals), { calls: 2, costedCalls: 1, inputTokens: 13, outputTokens: 6, cost: 0.5 });
+  assert.equal(formatCost(0), "$0");
+  assert.equal(formatCost(0.00123), "$0.0012");
+  assert.equal(formatCost(1.5), "$1.50");
+});

@@ -33,10 +33,14 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useApprovalExpired, useRun } from "./run-context";
 import { KnowledgeResultPreview } from "./nodes";
 import {
+  formatCost,
   getRunOutput,
+  sumUsage,
   type Answer,
   type NodeResultData,
+  type NodeUsage,
   type RunStatus,
+  type UsageTotals,
 } from "./runs";
 import type { WorkflowSummary } from "./server/liveblocks";
 import {
@@ -72,6 +76,33 @@ function formatTime(timestamp: number): string {
 function formatDuration(ms: number | undefined): string {
   if (ms === undefined) return "";
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
+function formatTokens(count: number): string {
+  return count.toLocaleString("en-US");
+}
+
+/** Tokens always; cost only when the provider reported it (layer two). */
+function UsageLine({ usage, totals, className }: { usage: NodeUsage | UsageTotals; totals?: boolean; className?: string }) {
+  const parts: string[] = [];
+  if (usage.inputTokens !== undefined || usage.outputTokens !== undefined) {
+    parts.push(`${formatTokens(usage.inputTokens ?? 0)} in · ${formatTokens(usage.outputTokens ?? 0)} out`);
+  }
+  if (usage.cost !== undefined) {
+    const partial = totals && "calls" in usage && usage.costedCalls < usage.calls;
+    parts.push(partial ? `${formatCost(usage.cost)} (${usage.calls - usage.costedCalls} without cost)` : formatCost(usage.cost));
+  } else if (parts.length > 0) {
+    parts.push("cost not reported");
+  }
+  if (parts.length === 0) return null;
+  return (
+    <p
+      className={`text-[10px] tabular-nums text-neutral-500 ${className ?? ""}`}
+      title="Tokens are provider counts. Cost is shown only when the provider reports it; nothing is estimated."
+    >
+      {totals ? "Usage: " : ""}{parts.join(" · ")}
+    </p>
+  );
 }
 
 function RunStatusIcon({ status }: { status: RunStatus | "skipped" }) {
@@ -396,6 +427,10 @@ function TraceNode({
           <RunStatusIcon status={approvalExpired ? "error" : message.status} />
         </button>
 
+        {message.usage ? (
+          <UsageLine usage={message.usage} className="border-t border-neutral-100 px-2.5 py-1" />
+        ) : null}
+
         {message.error ? (
           <p className="border-t border-neutral-100 px-2.5 py-1.5 text-xs text-red-700">
             {message.error}
@@ -574,8 +609,11 @@ function RunTrace({ workflowId }: { workflowId: string }) {
     );
   }
 
+  const totals = sumUsage(messages);
   return (
-    <ul className="flex flex-col gap-1.5">
+    <>
+      {totals.calls > 0 ? <UsageLine usage={totals} totals className="mb-1.5 px-1" /> : null}
+      <ul className="flex flex-col gap-1.5">
       {messages.map((message) => (
         <TraceNode
           key={message.nodeId}
@@ -593,7 +631,8 @@ function RunTrace({ workflowId }: { workflowId: string }) {
           }
         />
       ))}
-    </ul>
+      </ul>
+    </>
   );
 }
 
@@ -746,6 +785,11 @@ function RunList() {
                           Number(run.metadata.completedAt) -
                             Number(run.metadata.startedAt)
                         )}`
+                      : ""}
+                    {run.metadata.cost !== undefined
+                      ? ` · ${formatCost(Number(run.metadata.cost))}`
+                      : run.metadata.outputTokens !== undefined
+                      ? ` · ${formatTokens(Number(run.metadata.inputTokens ?? 0) + Number(run.metadata.outputTokens))} tokens`
                       : ""}
                   </span>
                 </span>

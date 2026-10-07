@@ -342,6 +342,30 @@ ASCII ID (96 characters), title (160), text (8,000), and optional credential-fre
 HTTPS URL (2,048). Unknown fields are rejected. Excerpts are at most 600
 characters; resolved queries and outputs are bounded to 32,000 characters.
 
+### Backup: export and import
+
+Workflows live only in Liveblocks Storage. Download backups regularly and keep
+them outside the deployment.
+
+- **One workflow:** the download button in the workflow header saves
+  `<name>-<date>.json`.
+- **Everything:** the download button on the workflow list saves every workflow
+  in the workspace as one file.
+- **Restore:** the upload button on the workflow list imports a backup file.
+  Each workflow in the file is created as a **new** workflow with its saved
+  name; existing workflows are never overwritten or merged. Delete the old
+  copy yourself if you no longer need it.
+
+Backups are JSON with `format: "jev-workflow-backup"`, `version: 1`, and a
+`workflows` array holding each workflow's `name`, `nodes`, and `edges` (node
+`id`, `type`, `position`, and `data` only). They contain workflow definitions,
+not run history, approvals, or credentials. Imports accept files of at most
+4 MB and 50 workflows, must come from the owner browser session on the
+application origin, and apply the same graph validation as a run, so a backup
+that references a removed model or an unknown connection is rejected with the
+workflow number and reason. Empty canvases round-trip. Run-only API tokens
+cannot export or import.
+
 ### Server-to-server runs
 
 Generate an independent random `WORKFLOW_API_TOKEN` (32–256 non-whitespace
@@ -369,6 +393,26 @@ continues work through Next.js `after()`. The distributed run reservation stays
 held until the active phase settles.
 Requests without valid credentials receive `401`; same-origin violations receive `403`; quota failures
 receive `429` with `Retry-After`; Redis unavailability receives `503`.
+
+### Usage and cost per run
+
+Every LLM node records what the provider reports, in two layers:
+
+1. **Tokens** (`inputTokens`, `outputTokens`) come from the AI SDK's
+   provider-neutral usage, so they are available from any provider, not only
+   OpenRouter.
+2. **Cost** (USD) is recorded only when the provider itself states it. With
+   OpenRouter, usage accounting is requested on every call and the returned
+   `cost` is stored. Nothing is estimated from a price table: a node whose
+   provider reports no cost shows "cost not reported" rather than a guess.
+
+The trace shows usage under each node and a total for the run. The run list
+shows the run's cost when every AI call reported one, otherwise its token
+total. The run API returns the same data as `usage` on each node and a
+run-level `usage` with `calls` and `costedCalls`, so a partial total is
+visible as such. Mock nodes report no usage. Jev decisions are billed in
+OpenRouter credits; that endpoint's response is not read for cost, so Jev
+nodes show no usage here. Check the OpenRouter dashboard for the authoritative bill.
 
 ### Resource and spending controls
 
