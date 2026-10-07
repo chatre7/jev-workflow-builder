@@ -30,6 +30,7 @@ import {
   jsonSize,
 } from "./execution-policy";
 import { validateConditionOperands, validateDataSource } from "./data-nodes";
+import { validateLlmOutputFields } from "./structured";
 import { validateTableConfig } from "./table";
 
 export const MAX_GRAPH_STORAGE_CHARS = 512_000;
@@ -156,6 +157,13 @@ export function validateWorkflowGraph(value: unknown): ValidatedWorkflowGraph {
         assertAllowedModel(node.data.model);
         text(node.data.prompt, MAX_FIELD_CHARS);
         text(node.data.system, MAX_FIELD_CHARS);
+        if (node.data.outputFormat !== undefined && node.data.outputFormat !== "text" && node.data.outputFormat !== "json") {
+          throw new ExecutionError("LLM output format must be text or json.");
+        }
+        if (node.data.outputFormat === "json") validateLlmOutputFields(node.data.fields);
+        else if (node.data.fields !== undefined && !Array.isArray(node.data.fields)) {
+          throw new ExecutionError("LLM output fields must be a list.");
+        }
         break;
       case "condition":
         validateDataSource(node.data.source);

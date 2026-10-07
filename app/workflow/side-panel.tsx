@@ -78,6 +78,16 @@ function formatDuration(ms: number | undefined): string {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
 
+/** Re-indents a JSON-mode reply; any other text is returned unchanged. */
+function prettyJson(text: string): string {
+  if (!text.startsWith("{")) return text;
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
 function formatTokens(count: number): string {
   return count.toLocaleString("en-US");
 }
@@ -460,8 +470,10 @@ function TraceNode({
         {message.nodeType === "llm" &&
         message.output !== undefined &&
         message.status !== "skipped" ? (
-          <p className="whitespace-pre-wrap border-t border-neutral-100 px-2.5 py-1.5 text-xs leading-relaxed text-neutral-700">
-            {message.output}
+          <p className={`whitespace-pre-wrap border-t border-neutral-100 px-2.5 py-1.5 text-xs leading-relaxed text-neutral-700 ${
+            message.status === "complete" && message.output.startsWith("{") ? "break-all font-mono" : ""
+          }`}>
+            {message.status === "complete" ? prettyJson(message.output) : message.output}
             {message.status === "running" ? (
               <span className="ml-0.5 inline-block h-3 w-1 animate-pulse bg-violet-500 align-middle" />
             ) : null}

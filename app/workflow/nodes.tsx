@@ -69,6 +69,10 @@ import {
   createOutputProperty,
   createQuestion,
   createTransformField,
+  createLlmOutputField,
+  LLM_FIELD_TYPES,
+  MAX_LLM_FIELDS,
+  type LlmOutputField,
   createTableFilter,
   createTableAggregate,
   getActivation,
@@ -779,6 +783,118 @@ const JevNodeView=memo(({ id,data,selected }: NodeProps<JevNode>) => {
 /*                                  LLM node                                  */
 /* -------------------------------------------------------------------------- */
 
+function LlmFieldEditor({
+  field,
+  fields,
+  onChange,
+  onRemove,
+}: {
+  field: LlmOutputField;
+  fields: LlmOutputField[];
+  onChange: (changes: Partial<Omit<LlmOutputField, "id">>) => void;
+  onRemove: () => void;
+}) {
+  const [draft, setDraft] = useState(field.name);
+  const [error, setError] = useState<string | null>(null);
+  const errorId = useId();
+
+  useEffect(() => setDraft(field.name), [field.name]);
+
+  function commit(value: string) {
+    const name = value.trim();
+    let message: string | null = null;
+    if (!/^[A-Za-z0-9_-]{1,96}$/.test(name)) {
+      message = "Use 1–96 letters, digits, underscores or hyphens.";
+    } else if (["__proto__", "constructor", "prototype"].includes(name)) {
+      message = "This field name is reserved. Choose another name.";
+    } else if (fields.some((entry) => entry.id !== field.id && entry.name === name)) {
+      message = "This field already exists.";
+    }
+    setError(message);
+    setDraft(message ? field.name : name);
+    if (!message && name !== field.name) onChange({ name });
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5 rounded-md border border-neutral-100 p-2">
+      <div className="flex items-end gap-1">
+        <label className="flex min-w-0 flex-1 flex-col gap-1">
+          <FieldLabel>Field name</FieldLabel>
+          <input
+            aria-label={`JSON field name: ${field.name}`}
+            aria-invalid={Boolean(error)}
+            aria-describedby={error ? errorId : undefined}
+            value={draft}
+            maxLength={96}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              setError(null);
+            }}
+            onBlur={(event) => commit(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                event.currentTarget.blur();
+              } else if (event.key === "Escape") {
+                setDraft(field.name);
+                event.currentTarget.value = field.name;
+                event.currentTarget.blur();
+              }
+            }}
+            spellCheck={false}
+            className="workflow-field nodrag nopan min-w-0 w-full rounded-md border border-neutral-200 bg-white px-2 py-1 font-mono text-xs text-neutral-900 focus:border-violet-400 focus:outline-none"
+          />
+        </label>
+        <label className="flex shrink-0 flex-col gap-1">
+          <FieldLabel>Type</FieldLabel>
+          <Select
+            aria-label={`Type for ${field.name}`}
+            value={field.type}
+            onChange={(event) => onChange({ type: event.target.value as LlmOutputField["type"] })}
+          >
+            {LLM_FIELD_TYPES.map((type) => (
+              <option key={type} value={type}>{type}</option>
+            ))}
+          </Select>
+        </label>
+        <button
+          type="button"
+          onClick={onRemove}
+          disabled={fields.length <= 1}
+          className="icon-button nodrag shrink-0 hover:!text-red-600"
+          aria-label={`Remove field ${field.name}`}
+          title={fields.length <= 1 ? "Keep at least one field" : "Remove field"}
+        >
+          <Trash2 className="size-3" />
+        </button>
+      </div>
+      {error ? (
+        <p id={errorId} role="alert" className="text-[10px] text-red-600">
+          {error}
+        </p>
+      ) : null}
+      <label className="flex flex-col gap-1">
+        <FieldLabel>Description</FieldLabel>
+        <TextField
+          aria-label={`Description for ${field.name}`}
+          value={field.description}
+          maxLength={500}
+          placeholder="What the model should put here"
+          onCommit={(description) => onChange({ description })}
+        />
+      </label>
+      <label className="nodrag flex items-center gap-1.5 text-[11px] text-neutral-600">
+        <input
+          type="checkbox"
+          checked={field.required}
+          onChange={(event) => onChange({ required: event.target.checked })}
+        />
+        Required
+      </label>
+    </div>
+  );
+}
+
 const LlmNodeView = memo(({ id, data, selected }: NodeProps<LlmNode>) => {
   const { updateNodeData } = useReactFlow<WorkflowNode>();
   const { results } = useRun();
@@ -786,6 +902,21 @@ const LlmNodeView = memo(({ id, data, selected }: NodeProps<LlmNode>) => {
   const node: LlmNode = { id, type: "llm", position: { x: 0, y: 0 }, data };
   const modelLabel =
     LLM_MODELS.find((model) => model.id === data.model)?.label ?? data.model;
+  const jsonMode = data.outputFormat === "json";
+  const fields = data.fields ?? [];
+
+  function setOutputFormat(format: "text" | "json") {
+    updateNodeData(id, format === "json"
+      ? { outputFormat: "json", fields: fields.length > 0 ? fields : [createLlmOutputField(1)] }
+      : { outputFormat: "text" });
+  }
+
+  function addField() {
+    if (fields.length >= MAX_LLM_FIELDS) return;
+    let index = 1;
+    while (fields.some((field) => field.name === `field_${index}`)) index++;
+    updateNodeData(id, { fields: [...fields, createLlmOutputField(index)] });
+  }
 
   return (
     <NodeFrame
@@ -801,6 +932,7 @@ const LlmNodeView = memo(({ id, data, selected }: NodeProps<LlmNode>) => {
         <div className="flex flex-col gap-1.5">
           <p className="text-xs text-neutral-500">
             <span className="font-medium text-neutral-700">{modelLabel}</span>
+            {jsonMode ? ` · JSON (${fields.length} ${fields.length === 1 ? "field" : "fields"})` : ""}
             {result?.mock ? " · mock" : ""}
           </p>
           {result?.output !== undefined && result.status !== "skipped" ? (
@@ -866,6 +998,52 @@ const LlmNodeView = memo(({ id, data, selected }: NodeProps<LlmNode>) => {
             connect in, <code>{"{{input}}"}</code> is their texts joined —
             useful for combining drafts before the output node.
           </p>
+          <label className="flex flex-col gap-1">
+            <FieldLabel>Output</FieldLabel>
+            <Select
+              value={jsonMode ? "json" : "text"}
+              onChange={(event) => setOutputFormat(event.target.value as "text" | "json")}
+            >
+              <option value="text">Text</option>
+              <option value="json">JSON fields</option>
+            </Select>
+          </label>
+          {jsonMode ? (
+            <div className="flex flex-col gap-2">
+              {fields.map((field) => (
+                <LlmFieldEditor
+                  key={field.id}
+                  field={field}
+                  fields={fields}
+                  onChange={(changes) =>
+                    updateNodeData(id, {
+                      fields: fields.map((entry) =>
+                        entry.id === field.id ? { ...entry, ...changes } : entry
+                      ),
+                    })
+                  }
+                  onRemove={() => {
+                    if (fields.length <= 1) return;
+                    updateNodeData(id, { fields: fields.filter((entry) => entry.id !== field.id) });
+                  }}
+                />
+              ))}
+              <button
+                type="button"
+                onClick={addField}
+                disabled={fields.length >= MAX_LLM_FIELDS}
+                className="nodrag flex min-h-7 items-center justify-center gap-1 rounded-md border border-dashed border-neutral-200 px-2 py-1 text-[11px] text-neutral-500 hover:border-neutral-300 hover:text-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Plus className="size-3" /> Add field ({fields.length}/{MAX_LLM_FIELDS})
+              </button>
+              <p className="text-[11px] leading-relaxed text-neutral-500">
+                The model is asked for a JSON object with exactly these fields and
+                the reply is checked against them; a reply that does not match fails
+                the run. Downstream nodes read the result as <code>json.&lt;field&gt;</code>.
+                Some free models ignore the schema.
+              </p>
+            </div>
+          ) : null}
         </div>
       }
     />

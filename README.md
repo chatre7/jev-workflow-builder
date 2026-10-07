@@ -70,6 +70,28 @@ Model IDs are stored in workflows. If an existing workflow selected
 `moonshotai/kimi-k3-fast`, choose another model in the editor: that ID is not
 available on OpenRouter. It is not silently remapped.
 
+### LLM JSON output
+
+Each LLM node has an **Output** setting: **Text** (default) or **JSON fields**.
+In JSON mode you declare 1–16 fields, each with a name, a type (`string`,
+`number`, `boolean` or `string[]`), an optional description and a required
+flag. The node asks the provider for an object matching a closed JSON Schema
+built from those fields, then checks the reply itself: a reply that is not
+JSON, is not an object, lacks a required field, or has a field of the wrong
+type fails the run with the field named in the error. Unknown keys are dropped
+and a `null` optional field is omitted, so the node's output is canonical JSON
+text in declared field order. Downstream Condition, Transform and Table nodes
+read it as `json.<field>`.
+
+The prompt and system text are unchanged; describe the task there and the
+shape here. Markdown fences around the JSON are tolerated. Not every model
+honors a response schema (some free models ignore it); the check above means
+such a model produces an error rather than prose flowing into data nodes.
+Without an OpenRouter key the labeled mock returns placeholder values in the
+configured shape. Field names use letters, numbers, underscores or hyphens,
+must be unique, and reject reserved prototype keys. Descriptions are limited to
+500 characters.
+
 ### Condition and Transform nodes
 
 Both nodes run locally without an AI provider call or model tokens. Add them
