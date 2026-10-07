@@ -6,12 +6,18 @@ A private, single-owner Jev/LLM workflow builder using Next.js, React Flow,
 password authentication, and Upstash Redis for storage, run history and
 admission.
 
+Start with [setup](#set-up), then [import the sample workflows](#ready-to-import-sample-workflows).
+See [sample troubleshooting](#sample-troubleshooting) for configuration errors
+and [verification](#verification) for the local checks.
+
 ### Set up
 
 1. Use Node.js **22 or newer** and run `npm ci`.
 2. Copy `.env.example` to `.env.local`. Never commit real credentials.
 3. Set `OWNER_PASSWORD` to a unique, randomly generated password (16–256
    characters). No GitHub account or OAuth App is required.
+   This is the value requested by the **Owner password** sign-in field, not
+   your OpenRouter key or GitHub password. There is no built-in default password.
 4. Set `NEXTAUTH_URL` to the exact origin, such as `http://localhost:3000` locally.
    HTTPS is required outside localhost. Generate a separate random
    `NEXTAUTH_SECRET` of at least 32 characters, for example:
@@ -368,6 +374,31 @@ join, HTTP requests, human Approval, Knowledge Search, LLM text, LLM structured
 JSON, and Jev choice/score/noul questions. Each Input includes synthetic sample
 data. Approval examples only route data; they do not issue payments or refunds.
 
+#### Sample catalog
+
+The table follows the order in the backup; imported workflow names are Thai.
+Every workflow includes Input and Output nodes.
+
+| Example / named output | What to inspect with the included input | Additional service |
+| --- | --- | --- |
+| CSV customers — `rows` | Three rows; IDs such as `0007` stay strings. Thai text, quoted commas, and escaped quotes are preserved. | None |
+| Table paid sales — `sales_summary` | Six input rows become four paid rows and two groups: สมชาย has 2 orders totaling `"1500"`; สมหญิง has 2 totaling `"1000"`. | None |
+| Condition order review — `review`, `standard` | Amount `12500` takes the review branch; amounts below `10000` take the standard branch. Only the selected output receives the original input. | None |
+| Transform order normalization — `normalized` | Nested paths become named fields; `total_thb` remains a number and `express` a boolean. Internal notes and contact email are omitted. | None |
+| Parallel customer/order join — `combined` | Two Transform branches complete before an `all` join. `customer_view` and `order_view` contain each parent's JSON text, not flattened objects. | None |
+| HTTP public API — `todo` | Input `1` requests `/todos/1`; the result retains a numeric `task_id`, a title, and boolean `completed`. | `public-demo` HTTP connection |
+| Human Approval — `approved`, `rejected` | The run pauses at `waiting`; the owner decision sends the original request only to the chosen branch. | Owner browser session |
+| Knowledge policy search — `matches` | The Thai refund query retrieves the demo refund policy with its source ID, excerpt, and lexical score. | Bundled knowledge catalog |
+| LLM Thai reply — `draft` | Draft a polite response about order `TH-240918`, without claiming that a refund or replacement was completed. Wording varies. | OpenRouter text model |
+| LLM typed extraction — `extracted` | Request six schema-validated fields, including numeric `total_thb`, boolean payment/invoice flags, and a `string[]` of items. | OpenRouter JSON-capable model |
+| Jev ticket assessment — `assessment` | Inspect choice, score, and noul answers plus their confidence/probability values. Model judgments are not guaranteed fixed answers. | OpenRouter Jev access |
+
+The run API's named outputs are **arrays of strings**. CSV, Table, Transform,
+Knowledge, and JSON-mode LLM results contain serialized JSON inside those
+strings; parse the string when consuming it programmatically.
+
+#### Import and run
+
 Enable the demo services in `.env.local` before importing the complete pack.
 Merge `public-demo` into any existing HTTP connection map rather than replacing
 other connections:
@@ -377,10 +408,22 @@ WORKFLOW_HTTP_CONNECTIONS='{"public-demo":{"baseUrl":"https://jsonplaceholder.ty
 WORKFLOW_KNOWLEDGE_FILE=examples/knowledge.json
 ```
 
-Restart the server, sign in, and use **Import a backup file as new workflows**
-on the workflow list to select the sample file. Import creates new copies; it
-does not overwrite existing workflows. Open a sample and select **Run**. For
-Approval, select **Approve** or **Reject** after the run reaches `waiting`.
+1. Restart the server after setting the environment, then sign in with the owner
+   password.
+2. On the workflow list, select **Import a backup file as new workflows** and
+   choose `examples/sample-workflows.json`. Import creates new copies; it does
+   not overwrite existing workflows or restore run history.
+3. Open a sample and select **Run**. The run panel starts with that workflow's
+   Input sample; inspect the execution trace and named Output results.
+4. For the other Condition branch, change `amount` to `2400` in the run input.
+   The threshold itself, `10000`, belongs to the review branch.
+5. For Approval, select **Approve** or **Reject** when the run reaches `waiting`.
+   Start a fresh run to test the opposite decision; a completed decision cannot
+   be changed or replayed.
+
+Run the examples sequentially rather than launching the entire pack at once.
+Every start and approval resume consumes admission quota, including examples
+without AI; see [resource and spending controls](#resource-and-spending-controls).
 Knowledge uses the bundled illustrative DEMO policies, not real business rules.
 
 The three AI examples need a valid `OPENROUTER_API_KEY` for real execution:
@@ -388,6 +431,18 @@ LLM text uses `liquid/lfm-2.5-2.6b:free`, structured extraction uses the paid
 `openai/gpt-5.4-mini`, and Jev uses the paid `typesafe/jev-1.13`. Provider access,
 credits, availability, and application run quotas still apply. The backup
 contains no credentials, run history, or approval checkpoints.
+
+#### Sample troubleshooting
+
+| Symptom | Action |
+| --- | --- |
+| Import reports an unknown or unconfigured HTTP connection | Configure the `public-demo` alias before importing the full pack, then restart the server. The importer validates connection aliases too. |
+| Knowledge reports a missing or unreadable catalog | Set `WORKFLOW_KNOWLEDGE_FILE=examples/knowledge.json`, start the server from the project root, and ensure the file is readable. |
+| LLM or Jev reports a provider request failure | Check the OpenRouter key, credits, and access to the selected model. If OpenRouter reports `401` / `API key expired`, replace `OPENROUTER_API_KEY` in `.env.local` and restart the server. Do not put keys in workflows or bug reports. |
+| AI output is labeled mock | No OpenRouter key is configured. Mock output is not evidence that a real model works; configure a valid key to test the provider. A configured provider failure does not fall back to mock output. |
+| An Approval run stays at `waiting` | This is expected until the owner selects Approve or Reject. After checkpoint expiry, start a new run rather than retrying the expired decision. |
+| A start or resume returns `429` | Respect `Retry-After` and the applicable rate/day limit. Accepted reservations are not refunded when execution fails; repeatedly clicking Run can consume more quota. |
+
 
 ### Backup: export and import
 
@@ -543,11 +598,20 @@ and import the file. Run history does not migrate.
 ### Verification
 
 ```sh
-npm run typecheck
+npm run lint
 npm test
 npm run build
+npm run typecheck
 npm audit --package-lock-only
 ```
+
+`npm test` uses isolated external services; it does **not** run the real-Redis
+integration suite below or prove access to live AI providers.
+
+After pulling a version that removes routes, a build may find stale references
+under `.next/dev/types`. Stop the dev server, remove only that generated
+directory, then run `npm run build` and `npm run typecheck` again. Do not disable
+type checking to hide stale generated route errors.
 
 Security regressions use Node's test runner and unchanged application modules
 with isolated external services. They cover authorization, workspace isolation,
