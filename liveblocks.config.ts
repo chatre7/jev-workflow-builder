@@ -37,6 +37,11 @@ declare global {
       error?: string;
       // Published only after a durable approval checkpoint is acknowledged.
       approvalToken?: string;
+      // Provider-reported usage so far, as decimal strings. `cost` (USD) is
+      // set only when every AI call in the run reported its own cost.
+      inputTokens?: string;
+      outputTokens?: string;
+      cost?: string;
     };
 
     // One message per executed node, written server-side and streamed via

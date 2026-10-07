@@ -10,6 +10,7 @@ import {
   checkAbort,
   checkLimit,
 } from "./execution-policy";
+import type { NodeUsage } from "../runs";
 
 export type LlmRunOptions = {
   system: string;
@@ -21,7 +22,37 @@ export type LlmRunOptions = {
   signal: AbortSignal;
 };
 
-export type LlmResult = { text: string; mock: boolean; model: string };
+export type LlmResult = { text: string; mock: boolean; model: string; usage?: NodeUsage };
+
+const MAX_USAGE_TOKENS = 1_000_000_000;
+const MAX_USAGE_COST = 1_000_000;
+
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_USAGE_TOKENS
+    ? value : undefined;
+}
+
+/**
+ * Tokens come from the AI SDK's provider-neutral usage. Cost is taken only
+ * from OpenRouter's own accounting, never computed from a price table.
+ */
+export function readLlmUsage(totalUsage: unknown, providerMetadata: unknown): NodeUsage | undefined {
+  const usage: NodeUsage = {};
+  if (totalUsage && typeof totalUsage === "object") {
+    const { inputTokens, outputTokens } = totalUsage as Record<string, unknown>;
+    if (tokenCount(inputTokens) !== undefined) usage.inputTokens = tokenCount(inputTokens);
+    if (tokenCount(outputTokens) !== undefined) usage.outputTokens = tokenCount(outputTokens);
+  }
+  const openrouter = providerMetadata && typeof providerMetadata === "object"
+    ? (providerMetadata as Record<string, unknown>).openrouter : undefined;
+  const accounting = openrouter && typeof openrouter === "object"
+    ? (openrouter as Record<string, unknown>).usage : undefined;
+  const cost = accounting && typeof accounting === "object" ? (accounting as Record<string, unknown>).cost : undefined;
+  if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0 && cost <= MAX_USAGE_COST) {
+    usage.cost = Math.round(cost * 1e8) / 1e8;
+  }
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
 
 export async function runLlm(options: LlmRunOptions): Promise<LlmResult> {
   checkAbort(options.signal);
@@ -45,7 +76,8 @@ export async function runLlm(options: LlmRunOptions): Promise<LlmResult> {
     const openrouter = createOpenRouter({ apiKey });
     let streamFailed = false;
     const result = streamText({
-      model: openrouter(options.model),
+      // Usage accounting adds OpenRouter's token counts and cost to the final chunk.
+      model: openrouter(options.model, { usage: { include: true } }),
       system: options.system || undefined,
       prompt: options.prompt,
       abortSignal: signal,
@@ -67,7 +99,14 @@ export async function runLlm(options: LlmRunOptions): Promise<LlmResult> {
     }
     checkAbort(signal);
     if (streamFailed) throw new Error("LLM provider stream failed.");
-    return { text, mock: false, model: options.model };
+    // Usage is informational: a missing or rejected usage promise never fails a reply.
+    const [totalUsage, providerMetadata] = await abortable(
+      Promise.all([result.totalUsage, result.providerMetadata]).catch(() => [undefined, undefined]),
+      signal
+    );
+    checkAbort(signal);
+    const usage = readLlmUsage(totalUsage, providerMetadata);
+    return { text, mock: false, model: options.model, ...(usage ? { usage } : {}) };
   } catch (error) {
     checkAbort(signal);
     throw error instanceof ExecutionError

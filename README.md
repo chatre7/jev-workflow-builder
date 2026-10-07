@@ -394,6 +394,26 @@ held until the active phase settles.
 Requests without valid credentials receive `401`; same-origin violations receive `403`; quota failures
 receive `429` with `Retry-After`; Redis unavailability receives `503`.
 
+### Usage and cost per run
+
+Every LLM node records what the provider reports, in two layers:
+
+1. **Tokens** (`inputTokens`, `outputTokens`) come from the AI SDK's
+   provider-neutral usage, so they are available from any provider, not only
+   OpenRouter.
+2. **Cost** (USD) is recorded only when the provider itself states it. With
+   OpenRouter, usage accounting is requested on every call and the returned
+   `cost` is stored. Nothing is estimated from a price table: a node whose
+   provider reports no cost shows "cost not reported" rather than a guess.
+
+The trace shows usage under each node and a total for the run. The run list
+shows the run's cost when every AI call reported one, otherwise its token
+total. The run API returns the same data as `usage` on each node and a
+run-level `usage` with `calls` and `costedCalls`, so a partial total is
+visible as such. Mock nodes report no usage. Jev decisions are billed in
+OpenRouter credits; that endpoint's response is not read for cost, so Jev
+nodes show no usage here. Check the OpenRouter dashboard for the authoritative bill.
+
 ### Resource and spending controls
 
 Policy constants live in `app/workflow/shared.ts`,

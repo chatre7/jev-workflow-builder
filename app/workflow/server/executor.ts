@@ -9,6 +9,7 @@ import {
   RUN_TIMEOUT_MS,
   createEmptyOutput,
   getRunOutput,
+  sumUsage,
   type Answer,
   type NodeResultData,
   type RunTrace,
@@ -483,6 +484,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
           await writeMessage({
             ...base, status: "complete", output: result.text, firedHandles: [OUT_HANDLE],
             mock: result.mock, model: result.model, durationMs: Date.now() - nodeStartedAt,
+            ...(result.usage ? { usage: result.usage } : {}),
           });
           return { output: result.text, answers, firedHandles: new Set([OUT_HANDLE]) };
         }
@@ -607,8 +609,13 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
       });
     }
   }
+  const usage = sumUsage([...messages.values()]);
   const finalMetadata: Liveblocks["FeedMetadata"] = {
     ...metadata, status: error ? "error" : waiting ? "waiting" : "complete",
+    // Totals so far, so the run list can show them without loading the trace.
+    ...(usage.inputTokens !== undefined ? { inputTokens: String(usage.inputTokens) } : {}),
+    ...(usage.outputTokens !== undefined ? { outputTokens: String(usage.outputTokens) } : {}),
+    ...(usage.cost !== undefined && usage.costedCalls === usage.calls ? { cost: String(usage.cost) } : {}),
     ...(!waiting || error ? { completedAt: String(completedAt) } : {}),
     // The phase token is published only after a confirmed checkpoint save.
     // A timed-out SAVE cannot become claimable even if terminal cleanup fails.
@@ -652,6 +659,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
     startedAt, ...(!waiting || error ? { completedAt } : {}), ...(error ? { error } : {}),
     output: outputMessage ? getRunOutput(outputMessage.outputs) : createEmptyOutput(outputProperties),
     nodes: [...messages.values()].sort((a, b) => a.startedAt - b.startedAt),
+    ...(usage.calls > 0 ? { usage } : {}),
   };
 }
 
