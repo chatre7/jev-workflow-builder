@@ -14,7 +14,7 @@ async function harness({ principal = { id: "owner" }, available = true, delimite
       "next/server": { NextResponse: Response },
       "./auth": auth,
       "../../../../workflow/server/auth": auth,
-      "../../../../workflow/server/liveblocks": {
+      "../../../../workflow/server/store": {
         getWorkflow: async () => available ? { workflowId: "csv-preview" } : null,
         getRoomId: () => "authorized-room",
         readWorkflowGraph: async () => graph,

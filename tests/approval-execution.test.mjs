@@ -33,15 +33,14 @@ async function harness({ store = approvalStore(), graph, http, llm, knowledge } 
   const calls = { graph: 0, http: [], llm: [], knowledge: [] };
   let serial = 0;
   const client = {
-    createFeed: async (args) => events.push({ kind: "createFeed", ...structuredClone(args) }),
-    updateFeed: async (args) => events.push({ kind: "updateFeed", ...structuredClone(args) }),
-    createFeedMessage: async (args) => events.push({ kind: "createMessage", ...structuredClone(args) }),
-    updateFeedMessage: async (args) => events.push({ kind: "updateMessage", ...structuredClone(args) }),
+    createRun: async (args) => events.push({ kind: "createFeed", ...structuredClone(args) }),
+    updateRun: async (args) => events.push({ kind: "updateFeed", ...structuredClone(args) }),
+    writeNode: async (args) => events.push({ kind: "node", ...structuredClone(args) }),
   };
   const load = createModuleLoader({ stubs: {
     nanoid: { nanoid: () => `id${++serial}` },
     "csv-parse/sync": csvParse,
-    "./liveblocks": { getLiveblocks: () => client, readWorkflowGraph: async () => { calls.graph++; return graph; } },
+    "./store": { getRunStore: () => client, readWorkflowGraph: async () => { calls.graph++; return graph; } },
     "./approvals": store,
     "./http": { runHttpRequest: async (options) => { calls.http.push(options); return http ? http(options) : { text: "upstream-result", status: 200 }; } },
     "./knowledge": { searchKnowledge: async (options) => { calls.knowledge.push(options); return knowledge ? knowledge(options) : '{"matches":[]}'; } },
@@ -117,7 +116,7 @@ for (const decision of ["approved", "rejected"]) {
     assert.equal(approval.approval.decidedBy, "owner");
     assert.equal(approval.approval.expiresAt, expiresAt);
     assert.equal(restarted.events.some((entry) => entry.kind === "createFeed"), false);
-    assert(restarted.events.some((entry) => entry.kind === "updateMessage" && entry.messageId === `${waiting.runId}-approval-2`));
+    assert(restarted.events.some((entry) => entry.kind === "node" && entry.runId === waiting.runId && entry.data.nodeId === "approval-2"));
     await assert.rejects(h.store.claim(waiting.runId, "approval-2", decision), /consumed/);
   });
 }
@@ -292,9 +291,9 @@ async function routeHarness() {
     "./auth": { getPrincipal: async () => principal },
     "../../../../../../workflow/server/auth": { getPrincipal: async () => principal },
     "next/server": { NextResponse: Response, after: (callback) => { finished = callback(); } },
-    "../../../../../../workflow/server/liveblocks": {
+    "../../../../../../workflow/server/store": {
       getWorkflow: async () => ({ workflowId: "workflow-id" }), getRoomId: () => "room",
-      getLiveblocks: () => ({ getFeed: async () => ({ metadata: feedMetadata }) }),
+      getRunMetadata: async () => feedMetadata,
     },
     "../../../../../../workflow/server/run-admission": { acquireRunLease: async () => {
       calls.admissions++;

@@ -12,7 +12,7 @@ import { useRouter } from "next/navigation";
 import { useRef, useState, useTransition } from "react";
 import { HelpButton } from "../../components/help-button";
 import { createWorkflowAction } from "./actions";
-import type { WorkflowSummary } from "./server/liveblocks";
+import type { WorkflowSummary } from "./server/store";
 
 // Matches the server's import cap; checked first so a large file fails fast.
 const MAX_BACKUP_FILE_BYTES = 4 * 1024 * 1024;
@@ -198,10 +198,10 @@ export function WorkflowList({
                 </span>
                 <span className="shrink-0 whitespace-nowrap text-[10px] text-neutral-500">
                   <span className="hidden sm:inline">
-                    {workflow.lastConnectionAt ? "Opened " : "Created "}
+                    {workflow.updatedAt > workflow.createdAt ? "Edited " : "Created "}
                   </span>
                   {formatRelative(
-                    workflow.lastConnectionAt ?? workflow.createdAt
+                    workflow.updatedAt
                   )}
                 </span>
                 <ChevronRight

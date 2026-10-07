@@ -22,7 +22,7 @@ function loader(workspace, evalOverride, stubs = {}) {
     env: { UPSTASH_REDIS_REST_URL: "https://local-redis.test", UPSTASH_REDIS_REST_TOKEN: "local-only", NEXTAUTH_URL: "https://workflow.example" },
     stubs: {
       nanoid: { nanoid: () => randomUUID() },
-      "./liveblocks": { getWorkspaceId: () => workspace },
+      "./store": { getWorkspaceId: () => workspace },
       "./auth": { getPrincipal: async () => null },
       "@upstash/redis": { Redis: class {
         async eval(script, keys, args) {
@@ -186,23 +186,22 @@ async function routeHarness({ expireOnRecheck = false } = {}) {
   let feedReads = 0;
   const messages = [];
   const client = {
-    createFeed: async (args) => { metadata = args.metadata; },
-    updateFeed: async (args) => { metadata = args.metadata; },
-    getFeed: async () => {
-      if (++feedReads === 2 && expireOnRecheck) await redisCommand("PEXPIREAT", key, 1);
-      return { metadata };
-    },
-    createFeedMessage: async (args) => { messages.push(args); },
-    updateFeedMessage: async () => {},
+    createRun: async (args) => { metadata = args.metadata; },
+    updateRun: async (args) => { metadata = args.metadata; },
+    writeNode: async (args) => { messages.push(args); },
   };
-  const liveblocks = {
+  const store = {
     getWorkspaceId: () => workspace, getRoomId: () => roomId,
+    getRunMetadata: async () => {
+      if (++feedReads === 2 && expireOnRecheck) await redisCommand("PEXPIREAT", key, 1);
+      return metadata;
+    },
     getWorkflow: async () => ({ workflowId: "workflow" }),
-    getLiveblocks: () => client, readWorkflowGraph: async () => graph,
+    getRunStore: () => client, readWorkflowGraph: async () => graph,
   };
   const load = loader(workspace, undefined, {
-    "./liveblocks": liveblocks,
-    "../../../../../../workflow/server/liveblocks": liveblocks,
+    "./store": store,
+    "../../../../../../workflow/server/store": store,
     "./auth": { getPrincipal: async () => ({ id: "owner", name: "Owner" }) },
     "../../../../../../workflow/server/auth": { getPrincipal: async () => ({ id: "owner", name: "Owner" }) },
     "next/server": { NextResponse: Response, after: (callback) => { finished = callback(); } },
@@ -269,7 +268,7 @@ test("authoritative preflight rejects unavailable approvals without minute, dail
       status = 409;
       await redisCommand("HSET", h.key, "status", "running");
     }
-    // Liveblocks still advertises waiting: only Redis can reject these requests.
+    // The run store still advertises waiting: only Redis can reject these requests.
     assert.equal(h.metadata.status, "waiting");
     for (let attempt = 0; attempt < 3; attempt++) {
       assert.equal((await h.post(nodeId)).status, status, scenario);

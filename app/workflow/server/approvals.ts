@@ -5,7 +5,7 @@ import { APPROVAL_TTL_MS, type AnswerValue, type WorkflowEdge, type WorkflowNode
 import type { NodeResultData, RunTrigger } from "../runs";
 import { ExecutionError, RunBudget, checkLimit, jsonSize, type RunBudgetState } from "./execution-policy";
 import { getRedis } from "./redis";
-import { getWorkspaceId } from "./liveblocks";
+import { getWorkspaceId } from "./store";
 import { ApiError } from "./request-security";
 
 // Leave room for the Lua script and the REST envelope below Redis's 1 MiB request limit.

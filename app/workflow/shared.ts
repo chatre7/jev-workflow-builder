@@ -347,6 +347,32 @@ export type WorkflowEdge = Edge<WorkflowEdgeData, typeof WORKFLOW_EDGE_TYPE>;
 
 export type Point = { x: number; y: number };
 
+/**
+ * Keeps only the saved shape of a graph: layout, type and data. React Flow
+ * runtime state (selection, drag, measurements) is dropped before storage.
+ */
+export function toStoredGraph(graph: {
+  nodes: readonly WorkflowNode[];
+  edges: readonly WorkflowEdge[];
+}): { nodes: WorkflowNode[]; edges: WorkflowEdge[] } {
+  return {
+    nodes: graph.nodes.map((node) => ({
+      id: node.id,
+      type: node.type,
+      position: { x: node.position.x, y: node.position.y },
+      data: node.data,
+    }) as WorkflowNode),
+    edges: graph.edges.map((edge) => ({
+      id: edge.id,
+      type: edge.type,
+      source: edge.source,
+      sourceHandle: edge.sourceHandle,
+      target: edge.target,
+      ...(edge.targetHandle === undefined || edge.targetHandle === null ? {} : { targetHandle: edge.targetHandle }),
+    }) as WorkflowEdge),
+  };
+}
+
 /* -------------------------------------------------------------------------- */
 /*                                   Handles                                  */
 /* -------------------------------------------------------------------------- */

@@ -32,10 +32,9 @@ async function harness({ streamText, readGraph, clientOverrides = {}, approvals,
   let graph;
   const events = [];
   const client = {
-    createFeed: async (params) => { events.push({ kind: "createFeed", ...structuredClone(params) }); },
-    updateFeed: async (params) => { events.push({ kind: "updateFeed", ...structuredClone(params) }); },
-    createFeedMessage: async (params) => { events.push({ kind: "message", ...structuredClone(params) }); return { id: params.id }; },
-    updateFeedMessage: async (params) => { events.push({ kind: "message", ...structuredClone(params) }); },
+    createRun: async (params) => { events.push({ kind: "createFeed", ...structuredClone(params) }); },
+    updateRun: async (params) => { events.push({ kind: "updateFeed", ...structuredClone(params) }); },
+    writeNode: async (params) => { events.push({ kind: "message", ...structuredClone(params) }); },
     ...clientOverrides,
   };
   const load = createModuleLoader({
@@ -45,7 +44,7 @@ async function harness({ streamText, readGraph, clientOverrides = {}, approvals,
       "@upstash/redis": { Redis },
       "csv-parse/sync": csvParse,
       "./auth": { getPrincipal: async () => null },
-      "./liveblocks": { getWorkspaceId: () => "private", getLiveblocks: () => client, readWorkflowGraph: (...args) => readGraph ? readGraph(...args) : Promise.resolve(graph) },
+      "./store": { getWorkspaceId: () => "private", getRunStore: () => client, readWorkflowGraph: (...args) => readGraph ? readGraph(...args) : Promise.resolve(graph) },
       ...(approvals ? { "./approvals": approvals } : {}),
       ai: {
         streamText: streamText ?? (() => ({ textStream: (async function* () { yield "A helpful reply."; })() })),
@@ -488,8 +487,8 @@ test("snapshot rejection and hanging feed writes still attempt bounded terminal 
   const h = await harness({
     readGraph: async () => { throw new Error("Bearer credential-do-not-leak"); },
     clientOverrides: {
-      createFeed: () => Promise.withResolvers().promise,
-      updateFeed: async (params) => { metadata.push(params.metadata); },
+      createRun: () => Promise.withResolvers().promise,
+      updateRun: async (params) => { metadata.push(params.metadata); },
     },
     globals: { setTimeout: (callback, ms) => setTimeout(callback, ms === 1_000 ? 5 : ms) },
   });
@@ -579,12 +578,12 @@ test("failed message writes cannot starve terminal metadata finalization", async
     env: { OPENROUTER_API_KEY: "test-key" },
     streamText: () => { throw new Error("Bearer secret-provider-error"); },
     clientOverrides: {
-      updateFeedMessage: (params, options) => {
+      writeNode: (params, options) => {
         if (params.data.status !== "error") return Promise.resolve();
         options.signal.addEventListener("abort", () => { cancelledMessage = true; }, { once: true });
         return Promise.withResolvers().promise;
       },
-      updateFeed: async (params) => { metadata.push(params.metadata); },
+      updateRun: async (params) => { metadata.push(params.metadata); },
     },
     globals: {
       setTimeout: (callback, ms) => setTimeout(callback, ms === 1_000 ? 5 : ms === 2_000 ? 50 : ms),

@@ -18,6 +18,7 @@ import {
   MAX_FIELD_CHARS,
   MAX_GRAPH_EDGES,
   MAX_GRAPH_NODES,
+  MAX_GRAPH_STORAGE_CHARS,
   MAX_GRAPH_TEXT_CHARS,
   MAX_IDENTIFIER_CHARS,
   MAX_LABEL_CHARS,
@@ -33,7 +34,7 @@ import { validateConditionOperands, validateDataSource } from "./data-nodes";
 import { validateLlmOutputFields } from "./structured";
 import { validateTableConfig } from "./table";
 
-export const MAX_GRAPH_STORAGE_CHARS = 512_000;
+export { MAX_GRAPH_STORAGE_CHARS } from "./execution-policy";
 const RESERVED_KEYS: Record<string, boolean> = { ["__proto__"]: true, constructor: true, prototype: true };
 
 function record(value: unknown): asserts value is Record<string, unknown> {

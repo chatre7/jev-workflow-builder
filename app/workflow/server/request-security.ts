@@ -51,6 +51,16 @@ export async function authenticateRunRequest(request: Request): Promise<Principa
   return principal;
 }
 
+/** Browser-session owner only: run-only API tokens never reach editing or history. */
+export async function authenticateOwnerRequest(request: Request, purpose: string): Promise<Principal> {
+  if (request.headers.has("authorization")) {
+    throw new ApiError(403, `${purpose} requires the owner browser session, not an API token.`);
+  }
+  const principal = await getPrincipal();
+  if (!principal || principal.id !== "owner") throw new ApiError(401, "Sign in with the owner password.");
+  return principal;
+}
+
 /** Enforce a byte budget while reading, not after request.json() has allocated. */
 export async function readJsonObject(
   request: Request,

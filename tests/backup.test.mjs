@@ -1,66 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createModuleLoader } from "./load-module.mjs";
+import { createFakeRedis } from "./fake-redis.mjs";
 
 const owner = { id: "owner", name: "Owner", avatar: "", color: "#7654cb" };
 const env = {
   NEXTAUTH_URL: "https://workflow.example",
-  LIVEBLOCKS_SECRET_KEY: "sk_localdev",
+  UPSTASH_REDIS_REST_URL: "https://redis.example",
+  UPSTASH_REDIS_REST_TOKEN: "local-redis-token",
   WORKFLOW_WORKSPACE_ID: "team-a",
 };
 
-/** Real liveblocks.ts and backup.ts over an in-memory Liveblocks SDK stub. */
+/** Real store.ts and backup.ts over an in-memory Redis stand-in. */
 async function harness({ principal = owner } = {}) {
-  const rooms = new Map();
-  const storage = new Map();
   let ids = 0;
   const auth = { getPrincipal: async () => principal };
-  const roomOf = (id) => {
-    const room = rooms.get(id);
-    if (!room) {
-      const error = new LiveblocksError("Room not found");
-      error.status = 404;
-      throw error;
-    }
-    return room;
-  };
-  class LiveblocksError extends Error {}
+  const redis = createFakeRedis();
   const load = createModuleLoader({ env, stubs: {
     nanoid: { nanoid: () => `generated${++ids}` },
     "next/server": { NextResponse: Response },
     "./auth": auth,
     "../../../workflow/server/auth": auth,
     "../../../../workflow/server/auth": auth,
-    "@liveblocks/node": {
-      LiveblocksError,
-      Liveblocks: class {
-        async createRoom(id, { metadata, defaultAccesses }) {
-          const room = { id, metadata, defaultAccesses, createdAt: new Date(0).toISOString(), lastConnectionAt: null };
-          rooms.set(id, room);
-          return room;
-        }
-        async getRoom(id) { return roomOf(id); }
-        async getRooms() { return { data: [...rooms.values()] }; }
-        async getStorageDocument(id) { roomOf(id); return storage.get(id) ?? {}; }
-      },
-    },
-    "@liveblocks/react-flow/node": {
-      mutateFlow: async ({ roomId, storageKey }, mutate) => {
-        const nodes = {};
-        const edges = {};
-        mutate({
-          addNodes: (list) => { for (const node of list) nodes[node.id] = node; },
-          addEdges: (list) => { for (const edge of list) edges[edge.id] = edge; },
-        });
-        storage.set(roomId, { [storageKey]: { nodes, edges } });
-      },
-    },
+    "@upstash/redis": { Redis: redis.Redis },
   } });
   const shared = await load("app/workflow/shared");
   const demo = await load("app/workflow/demo");
-  const liveblocks = await load("app/workflow/server/liveblocks");
+  const store = await load("app/workflow/server/store");
   const backup = await load("app/workflow/server/backup");
-  return { load, shared, demo, liveblocks, backup, rooms, storage };
+  // Workflow hashes only; run hashes and indexes are separate keys.
+  const rooms = { get size() { return [...redis.hashes.keys()].filter((key) => /:wf:[^:]+$/.test(key)).length; } };
+  return { load, shared, demo, store, backup, rooms, redis };
 }
 
 // Modules run in a vm realm, so compare structure rather than prototypes.
@@ -75,7 +45,7 @@ test("export writes only saved node and edge fields and import restores an ident
   const { nodes, edges } = h.demo.createDemoWorkflow();
   // React Flow runtime state that must never reach a backup or an import.
   const runtime = { selected: true, dragging: true, measured: { width: 300, height: 120 }, width: 300 };
-  const created = await h.liveblocks.createWorkflow(owner, {
+  const created = await h.store.createWorkflow(owner, {
     name: "Triage ✓", graph: { nodes: nodes.map((node) => ({ ...node, ...runtime })), edges },
   });
   const exported = await h.backup.exportWorkflow(created.workflowId, owner);
@@ -103,8 +73,8 @@ test("export writes only saved node and edge fields and import restores an ident
 
 test("exporting everything includes empty workflows, which also round-trip", async () => {
   const h = await harness();
-  await h.liveblocks.createWorkflow(owner, { name: "Empty" });
-  await h.liveblocks.createWorkflow(owner, { seedDemo: true });
+  await h.store.createWorkflow(owner, { name: "Empty" });
+  await h.store.createWorkflow(owner, { seedDemo: true });
   const all = await h.backup.exportAllWorkflows(owner);
   assert.deepEqual(plain(all.workflows.map((workflow) => workflow.nodes.length).sort()), [0, 8]);
   const created = await h.backup.importWorkflows(owner, h.backup.parseBackup(JSON.parse(JSON.stringify(all))));
@@ -162,7 +132,7 @@ test("backup routes require the owner browser session and import checks origin a
   assert.equal((await all.GET(request("/api/workflows/export", bearer))).status, 403);
   assert.equal((await one.GET(request("/api/workflows/generated123/export"), params)).status, 404);
 
-  const created = await h.liveblocks.createWorkflow(owner, { seedDemo: true });
+  const created = await h.store.createWorkflow(owner, { seedDemo: true });
   const response = await one.GET(request(`/api/workflows/${created.workflowId}/export`), { params: Promise.resolve({ workflowId: created.workflowId }) });
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-disposition"), /^attachment; filename="support-ticket-triage-\d{4}-\d{2}-\d{2}\.json"$/);

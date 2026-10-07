@@ -1,13 +1,13 @@
 "use client";
 
-import { AvatarStack } from "@liveblocks/react-ui";
-import { ChevronRight, Download, Plus, Workflow } from "lucide-react";
+import { Check, ChevronRight, CloudOff, Download, Loader2, Plus, Workflow } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { HelpButton } from "../../components/help-button";
 import { createWorkflowAction, renameWorkflowAction } from "./actions";
-import type { WorkflowSummary } from "./server/liveblocks";
+import { useGraph } from "./graph-context";
+import type { WorkflowSummary } from "./server/store";
 
 export function WorkflowHeader({
   workflow,
@@ -15,6 +15,7 @@ export function WorkflowHeader({
   workflow: WorkflowSummary;
 }) {
   const router = useRouter();
+  const { saveState } = useGraph();
   const [name, setName] = useState(workflow.name);
   const [isPending, startTransition] = useTransition();
   // Escape blurs before React re-renders, so blur would otherwise save the edit.
@@ -93,9 +94,22 @@ export function WorkflowHeader({
       </div>
 
       <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
-        <div className="hidden border-r border-neutral-200 pr-3 sm:block">
-          <AvatarStack size={24} gap={3} max={3} />
-        </div>
+        <span
+          role="status"
+          title={
+            saveState === "saved" ? "All changes saved"
+              : saveState === "saving" || saveState === "dirty" ? "Saving changes"
+              : "Changes are not saved"
+          }
+          className={`hidden items-center gap-1 border-r border-neutral-200 pr-3 text-[11px] sm:flex ${
+            saveState === "error" || saveState === "conflict" ? "text-red-600" : "text-neutral-500"
+          }`}
+        >
+          {saveState === "saved" ? <Check className="size-3.5" aria-hidden />
+            : saveState === "error" || saveState === "conflict" ? <CloudOff className="size-3.5" aria-hidden />
+            : <Loader2 className="size-3.5 animate-spin" aria-hidden />}
+          {saveState === "saved" ? "Saved" : saveState === "error" || saveState === "conflict" ? "Not saved" : "Saving…"}
+        </span>
         <a
           href={`/api/workflows/${workflow.workflowId}/export`}
           download

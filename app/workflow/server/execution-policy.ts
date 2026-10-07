@@ -18,6 +18,8 @@ export const MAX_RUN_INTERMEDIATE_CHARS = 256_000;
 export const MAX_RUN_PROMPT_CHARS = 120_000;
 export const MAX_NODE_TRACE_CHARS = 160_000;
 export const MAX_RUN_TRACE_CHARS = 512_000;
+// Stored graph JSON; the same bound applies when a run reads it back.
+export const MAX_GRAPH_STORAGE_CHARS = 512_000;
 export const TRACE_FINALIZATION_RESERVE_CHARS = 64_000;
 export const MAX_RUN_FEED_CHARS = 2_000_000;
 // Input writes once, ordinary nodes running/terminal, approvals

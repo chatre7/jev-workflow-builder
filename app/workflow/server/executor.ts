@@ -2,7 +2,6 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 import { nanoid } from "nanoid";
-import type { Liveblocks as LiveblocksClient } from "@liveblocks/node";
 import {
   MAX_INPUT_PREVIEW,
   MAX_NODE_EXECUTIONS,
@@ -12,6 +11,8 @@ import {
   sumUsage,
   type Answer,
   type NodeResultData,
+  type RunEvent,
+  type RunMetadata,
   type RunTrace,
   type RunTrigger,
 } from "../runs";
@@ -64,7 +65,7 @@ import {
 } from "./execution-policy";
 import { validateWorkflowGraph, type ValidatedWorkflowGraph } from "./execution-validation";
 import { evaluateCondition, transformData, type DataNodeContext } from "./data-nodes";
-import { getLiveblocks, readWorkflowGraph } from "./liveblocks";
+import { getRunStore, readWorkflowGraph, type RunStore } from "./store";
 import { runLlm } from "./llm";
 import { parseStructuredOutput } from "./structured";
 import { askJev, toTypeSafeQuestions, type JevState } from "./typesafe";
@@ -107,6 +108,8 @@ export type RunWorkflowOptions = {
   trigger: RunTrigger;
   // Authorized, validated snapshot used by question-bearing API requests.
   graph?: ValidatedWorkflowGraph;
+  // Live progress for the request that started or resumed this run (SSE).
+  onEvent?: (event: RunEvent) => void;
 };
 
 export function startWorkflowRun(options: RunWorkflowOptions): {
@@ -118,12 +121,15 @@ export function startWorkflowRun(options: RunWorkflowOptions): {
 }
 
 /** Only a server-owned, atomically claimed checkpoint may enter this path. */
-export function resumeWorkflowRun(claim: ClaimedApproval): { runId: string; trace$: Promise<RunTrace> } {
+export function resumeWorkflowRun(
+  claim: ClaimedApproval,
+  onEvent?: (event: RunEvent) => void
+): { runId: string; trace$: Promise<RunTrace> } {
   const { checkpoint } = claim;
   return {
     runId: checkpoint.runId,
     trace$: runWorkflow(checkpoint.runId, {
-      roomId: checkpoint.roomId, input: checkpoint.input, question: checkpoint.question, trigger: checkpoint.trigger,
+      roomId: checkpoint.roomId, input: checkpoint.input, question: checkpoint.question, trigger: checkpoint.trigger, onEvent,
     }, claim),
   };
 }
@@ -138,12 +144,11 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
   let budget = new RunBudget();
   const messages = new Map<string, NodeResultData>();
   const messageSizes = new Map<string, number>();
-  const messageIds = new Map<string, string>();
   const results = new Map<string, Promise<NodeOutcome>>();
   const settled = new Map<string, NodeState | null>();
   const pending = new Map<string, PendingApproval>();
   const providerTasks = new Set<Promise<unknown>>();
-  let liveblocks: LiveblocksClient | undefined;
+  let store: RunStore | undefined;
   let outputProperties: OutputProperty[] = [];
   let executions = saved?.executions ?? 0;
   let waiting = false;
@@ -154,7 +159,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
   // Reserve metadata, the returned input, and terminal error overhead up front.
   let traceSize = TRACE_FINALIZATION_RESERVE_CHARS;
   let outputSize = 0;
-  const metadata: Liveblocks["FeedMetadata"] = {
+  const metadata: RunMetadata = {
     status: "running",
     trigger,
     input: typeof input === "string" ? truncate(input, MAX_INPUT_PREVIEW) : "",
@@ -164,6 +169,13 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
   function active(): void {
     if (closed) throw new ExecutionError("Workflow execution has finished.");
     checkAbort(signal);
+  }
+
+  function emit(event: RunEvent): void {
+    // A listener fault must never affect the run or its stored trace.
+    try {
+      options.onEvent?.(event);
+    } catch { /* ignore */ }
   }
 
   async function feed<T>(operation: (requestSignal: AbortSignal) => Promise<T>): Promise<T | undefined> {
@@ -190,19 +202,9 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
     outputSize = nextOutputSize;
     messageSizes.set(data.nodeId, size);
     messages.set(data.nodeId, data);
-    const messageId = messageIds.get(data.nodeId);
-    if (messageId) {
-      await feed((requestSignal) => liveblocks!.updateFeedMessage(
-        { roomId, feedId: runId, messageId, data }, { signal: requestSignal }
-      ));
-    } else {
-      // A deterministic ID avoids duplicate messages after an ambiguous timeout.
-      const id = `${runId}-${data.nodeId}`;
-      messageIds.set(data.nodeId, id);
-      await feed((requestSignal) => liveblocks!.createFeedMessage(
-        { roomId, feedId: runId, id, data }, { signal: requestSignal }
-      ));
-    }
+    emit({ type: "node", data });
+    // Keyed by node ID, so a retried write after a timeout cannot duplicate it.
+    await feed((requestSignal) => store!.writeNode({ roomId, runId, data }, { signal: requestSignal }));
     active();
   }
 
@@ -245,7 +247,6 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
         traceSize += size;
         messageSizes.set(message.nodeId, size);
         messages.set(message.nodeId, message);
-        messageIds.set(message.nodeId, `${runId}-${message.nodeId}`);
         if (message.nodeType === "output" && message.outputs) outputSize = jsonSize(message.outputs, MAX_NODE_TRACE_CHARS, "Run output");
       }
       traceSize += outputSize;
@@ -253,15 +254,14 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
     traceSize += jsonSize(input, MAX_RUN_TRACE_CHARS, "Run input");
     if (question) traceSize += jsonSize(question, MAX_RUN_TRACE_CHARS, "Run question");
     checkLimit(traceSize, MAX_RUN_TRACE_CHARS, "Run trace");
-    liveblocks = getLiveblocks();
+    store = getRunStore();
+    emit({ type: "run", metadata });
     if (saved) {
-      await feed((requestSignal) => liveblocks!.updateFeed(
-        { roomId, feedId: runId, metadata }, { signal: requestSignal }
-      ));
+      // Resumed phases replay the saved trace to a streaming listener first.
+      for (const message of messages.values()) emit({ type: "node", data: message });
+      await feed((requestSignal) => store!.updateRun({ roomId, runId, metadata }, { signal: requestSignal }));
     } else {
-      await feed((requestSignal) => liveblocks!.createFeed(
-        { roomId, feedId: runId, metadata }, { signal: requestSignal }
-      ));
+      await feed((requestSignal) => store!.createRun({ roomId, runId, metadata }, { signal: requestSignal }));
     }
     const snapshot = saved?.graph ?? options.graph ?? await boundedOperation(
       (requestSignal) => readWorkflowGraph(roomId, requestSignal), STORAGE_TIMEOUT_MS, signal
@@ -614,7 +614,7 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
     }
   }
   const usage = sumUsage([...messages.values()]);
-  const finalMetadata: Liveblocks["FeedMetadata"] = {
+  const finalMetadata: RunMetadata = {
     ...metadata, status: error ? "error" : waiting ? "waiting" : "complete",
     // Totals so far, so the run list can show them without loading the trace.
     ...(usage.inputTokens !== undefined ? { inputTokens: String(usage.inputTokens) } : {}),
@@ -626,7 +626,9 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
     ...(waiting && !error ? { approvalToken: phaseToken } : {}),
     ...(error ? { error } : {}),
   };
-  if (liveblocks) {
+  if (error) for (const message of messages.values()) if (message.status === "error") emit({ type: "node", data: message });
+  emit({ type: "run", metadata: finalMetadata });
+  if (store) {
     // One shared cleanup window, not a per-message timeout multiplied by nodes.
     try {
       await boundedOperation(async (cleanupSignal) => {
@@ -637,21 +639,15 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
             await Promise.all(Array.from({ length: Math.min(MAX_PROVIDER_CONCURRENCY, failures.length) }, async () => {
               while (index < failures.length && !messageSignal.aborted) {
                 const data = failures[index++];
-                const id = messageIds.get(data.nodeId);
                 try {
-                  if (id) await abortable(liveblocks!.updateFeedMessage(
-                    { roomId, feedId: runId, messageId: id, data }, { signal: messageSignal }
-                  ), messageSignal);
-                  else await abortable(liveblocks!.createFeedMessage(
-                    { roomId, feedId: runId, id: `${runId}-${data.nodeId}`, data }, { signal: messageSignal }
-                  ), messageSignal);
-                } catch { /* The terminal feed update retains its own cleanup time. */ }
+                  await abortable(store!.writeNode({ roomId, runId, data }, { signal: messageSignal }), messageSignal);
+                } catch { /* The terminal metadata update retains its own cleanup time. */ }
               }
             }));
           }, FEED_TIMEOUT_MS, cleanupSignal);
-        } catch { /* Always attempt terminal metadata, even if message writes hang. */ }
+        } catch { /* Always attempt terminal metadata, even if node writes hang. */ }
         checkAbort(cleanupSignal);
-        await abortable(liveblocks!.updateFeed({ roomId, feedId: runId, metadata: finalMetadata }, { signal: cleanupSignal }), cleanupSignal);
+        await abortable(store!.updateRun({ roomId, runId, metadata: finalMetadata }, { signal: cleanupSignal }), cleanupSignal);
       }, FEED_FINALIZE_TIMEOUT_MS);
     } catch { /* Never expose transport errors or let cleanup hold the run open. */ }
   }

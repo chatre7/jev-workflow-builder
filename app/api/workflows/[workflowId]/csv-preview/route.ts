@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPrincipal } from "../../../../workflow/server/auth";
 import { convertCsv } from "../../../../workflow/server/csv";
-import { getRoomId, getWorkflow, readWorkflowGraph } from "../../../../workflow/server/liveblocks";
+import { getRoomId, getWorkflow, readWorkflowGraph } from "../../../../workflow/server/store";
 import { ApiError, assertSameOrigin, readJsonObject } from "../../../../workflow/server/request-security";
 import { ExecutionError, STORAGE_TIMEOUT_MS, boundedOperation } from "../../../../workflow/server/execution-policy";
 import { INPUT_NODE_ID, IN_HANDLE, OUT_HANDLE, MAX_INPUT_CHARS } from "../../../../workflow/shared";
