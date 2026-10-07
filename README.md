@@ -342,6 +342,30 @@ ASCII ID (96 characters), title (160), text (8,000), and optional credential-fre
 HTTPS URL (2,048). Unknown fields are rejected. Excerpts are at most 600
 characters; resolved queries and outputs are bounded to 32,000 characters.
 
+### Backup: export and import
+
+Workflows live only in Liveblocks Storage. Download backups regularly and keep
+them outside the deployment.
+
+- **One workflow:** the download button in the workflow header saves
+  `<name>-<date>.json`.
+- **Everything:** the download button on the workflow list saves every workflow
+  in the workspace as one file.
+- **Restore:** the upload button on the workflow list imports a backup file.
+  Each workflow in the file is created as a **new** workflow with its saved
+  name; existing workflows are never overwritten or merged. Delete the old
+  copy yourself if you no longer need it.
+
+Backups are JSON with `format: "jev-workflow-backup"`, `version: 1`, and a
+`workflows` array holding each workflow's `name`, `nodes`, and `edges` (node
+`id`, `type`, `position`, and `data` only). They contain workflow definitions,
+not run history, approvals, or credentials. Imports accept files of at most
+4 MB and 50 workflows, must come from the owner browser session on the
+application origin, and apply the same graph validation as a run, so a backup
+that references a removed model or an unknown connection is rejected with the
+workflow number and reason. Empty canvases round-trip. Run-only API tokens
+cannot export or import.
+
 ### Server-to-server runs
 
 Generate an independent random `WORKFLOW_API_TOKEN` (32–256 non-whitespace

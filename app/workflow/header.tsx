@@ -1,7 +1,7 @@
 "use client";
 
 import { AvatarStack } from "@liveblocks/react-ui";
-import { ChevronRight, Plus, Workflow } from "lucide-react";
+import { ChevronRight, Download, Plus, Workflow } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
@@ -96,6 +96,15 @@ export function WorkflowHeader({
         <div className="hidden border-r border-neutral-200 pr-3 sm:block">
           <AvatarStack size={24} gap={3} max={3} />
         </div>
+        <a
+          href={`/api/workflows/${workflow.workflowId}/export`}
+          download
+          title="Download a backup of this workflow"
+          aria-label="Download a backup of this workflow"
+          className="icon-button"
+        >
+          <Download className="size-4" />
+        </a>
         <button
           type="button"
           title="New workflow"
