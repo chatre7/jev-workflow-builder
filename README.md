@@ -496,6 +496,87 @@ held until the active phase settles.
 Requests without valid credentials receive `401`; same-origin violations receive `403`; quota failures
 receive `429` with `Retry-After`; Redis unavailability receives `503`.
 
+### Webhook trigger
+
+Open **API → Webhook** and select **Create webhook URL**. The URL has the form
+`/api/hooks/<workflowId>/<secret>` and is shown **once**: the server stores
+only a SHA-256 hash of the secret. **Replace URL** issues a new secret and the
+old URL stops working immediately; **Disable** removes it.
+
+```sh
+curl -X POST "https://your-app.example/api/hooks/WORKFLOW_ID/SECRET?wait=true"   -H "Content-Type: application/json"   -d '{"message":"New support ticket: refund A-104"}'
+```
+
+The secret in the path is the only credential, so services that cannot set
+headers (forms, Zapier, chat platforms) can call it. No cookie, origin or
+bearer token is consulted. Unknown workflows and wrong secrets both return
+`404`. Bodies are limited to 96 KiB, and `webhookInput` in
+`app/workflow/server/webhook-input.ts` turns the body into the Input text.
+Without `?wait=true` the response is `202 { runId }`. Webhook runs show as
+`webhook` in **Runs** and use their own admission identity, so they cannot
+exhaust the owner's per-user limits (the workspace limits still apply). Treat
+the URL like a password: it appears in the caller's configuration and may
+appear in proxy logs.
+
+### Scheduled runs
+
+Open **API → Schedule** to run a workflow **every N minutes** (5 minutes to
+7 days, aligned to the clock) or **every day at HH:MM** in an IANA time zone
+such as `Asia/Bangkok`, with a fixed Input. Daylight-saving changes follow the
+zone's wall clock.
+
+Schedules run only when something calls the scheduler endpoint. Set a random
+`CRON_SECRET` (32–256 characters) and call `GET /api/cron` with
+`Authorization: Bearer $CRON_SECRET` every 5 minutes:
+
+- **Vercel Cron**: add `{"crons":[{"path":"/api/cron","schedule":"*/5 * * * *"}]}`
+  to `vercel.json`. Vercel sends the `CRON_SECRET` header automatically. Hobby
+  plans allow only daily cron jobs, so use an external caller for shorter intervals.
+- **GitHub Actions, cron-job.org or any server cron**: send the same request.
+
+Each tick starts at most two due schedules (the scheduler's concurrency
+limit); further due schedules start on the next tick. An occurrence is claimed
+atomically, so overlapping ticks never start it twice. Occurrences are **not
+replayed**: if the scheduler was down for hours, the schedule runs once and
+then resumes. An occurrence refused by the admission limits is skipped and
+reported in the tick's `skipped` list.
+
+### Approval notices
+
+Set `WORKFLOW_APPROVAL_NOTIFY` to send a message when a run starts waiting for
+approval. It names one `WORKFLOW_HTTP_CONNECTIONS` alias, so notices get the
+same HTTPS, private-address and header protections as HTTP Request nodes.
+`format` selects the payload: `slack` (`{text}`), `discord` (`{content}`),
+`telegram` (`{chat_id, text}`, requires `chatId`) or `json` (the full notice).
+
+```dotenv
+WORKFLOW_HTTP_CONNECTIONS='{"telegram":{"baseUrl":"https://api.telegram.org/botYOUR_BOT_TOKEN/","methods":["POST"]}}'
+WORKFLOW_APPROVAL_NOTIFY='{"connection":"telegram","path":"sendMessage","format":"telegram","chatId":"123456789"}'
+```
+
+For Slack or Discord incoming webhooks, put the fixed part in `baseUrl` and the
+rest in `path`, because base paths always gain a trailing slash. For example,
+`"baseUrl":"https://hooks.slack.com/services/"` with
+`"path":"T000/B000/XXXX"`. This path is server configuration, not node data.
+The message lists each new approval's prompt, its expiry and a link to the
+workflow. Each approval is announced once. Delivery is best effort: a failed
+notice is logged and never changes the run.
+
+### Sending results to other services
+
+HTTP Request nodes already send results out. Use Transform to build the JSON
+body, then POST `{{input}}`. `examples/sample-notify-workflow.json` summarizes a
+report with an LLM and posts it to Telegram (connection `telegram`, path
+`sendMessage?chat_id=YOUR_CHAT_ID`). Replace `YOUR_CHAT_ID` after importing. It
+is kept out of the main sample pack because it needs your own bot.
+
+### Service status
+
+The editor header shows a status icon from `GET /api/health` (owner only,
+cached for one minute, `?fresh=true` to bypass). It reports whether Redis
+answers and whether OpenRouter accepts the API key, including an expired key
+and the key's remaining credit. Checking the key does not consume credits.
+
 ### Usage and cost per run
 
 Every LLM node records what the provider reports, in two layers:

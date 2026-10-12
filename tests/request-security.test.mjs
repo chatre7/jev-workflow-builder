@@ -55,7 +55,7 @@ test("body byte budget also applies to streaming requests without Content-Length
   const chunks = [new TextEncoder().encode('{"input":"'), new Uint8Array(32), new Uint8Array(32)];
   let cancelled = false;
   const body = new ReadableStream({
-    pull(controller) { const chunk = chunks.shift(); chunk ? controller.enqueue(chunk) : controller.close(); },
+    pull(controller) { const chunk = chunks.shift(); if (chunk) controller.enqueue(chunk); else controller.close(); },
     cancel() { cancelled = true; },
   });
   const streamed = new Request("https://workflow.example/api", {

@@ -1,13 +1,14 @@
 import "server-only";
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { nanoid } from "nanoid";
 import { createDemoWorkflow, DEMO_WORKFLOW_NAME } from "../demo";
-import type { NodeResultData, RunMetadata } from "../runs";
+import { RUN_TRIGGERS, type NodeResultData, type RunMetadata } from "../runs";
 import { ROOM_ID_PREFIX, toStoredGraph, type WorkflowEdge, type WorkflowNode } from "../shared";
 import type { Principal } from "./auth";
 import { ExecutionError, MAX_GRAPH_EDGES, MAX_GRAPH_NODES, MAX_GRAPH_STORAGE_CHARS, checkLimit, jsonSize } from "./execution-policy";
 import { getRedis, getRedisConfigurationError } from "./redis";
+import { nextRunAt, parseSchedule, type WorkflowSchedule } from "./schedule";
 import { ApiError } from "./request-security";
 
 /**
@@ -18,6 +19,10 @@ import { ApiError } from "./request-security";
  *   jev:store:{ws}:wf:<id>        HASH  name, createdAt, updatedAt, version, graph
  *   jev:store:{ws}:wf:<id>:runs   ZSET  runId -> startedAt (newest MAX_STORED_RUNS kept)
  *   jev:store:{ws}:run:<runId>    HASH  metadata fields + node:<nodeId> -> JSON trace
+ *   jev:store:{ws}:schedules      ZSET  workflowId -> next scheduled run (ms)
+ *
+ * A workflow hash may also hold `webhookHash` (SHA-256 of its webhook secret;
+ * the secret itself is shown once and never stored) and `schedule` (JSON).
  */
 const WORKFLOW_ID = /^[A-Za-z0-9_-]{10,64}$/;
 const RUN_ID = /^run-[A-Za-z0-9_-]{1,64}$/;
@@ -77,6 +82,7 @@ function keys() {
     workflow: (id: string) => `${prefix}:wf:${id}`,
     runs: (id: string) => `${prefix}:wf:${id}:runs`,
     run: (runId: string) => `${prefix}:run:${runId}`,
+    schedules: `${prefix}:schedules`,
   };
 }
 
@@ -379,7 +385,7 @@ const METADATA_KEYS = [
 function readMetadata(fields: StoredStrings, workflowId: string): RunMetadata | null {
   if (fields.workflowId !== workflowId) return null;
   if (!["running", "waiting", "complete", "error"].includes(fields.status)) return null;
-  if (fields.trigger !== "test" && fields.trigger !== "api") return null;
+  if (!(RUN_TRIGGERS as readonly string[]).includes(fields.trigger)) return null;
   if (integer(fields.startedAt) === null) return null;
   const metadata: Record<string, string> = {};
   for (const key of METADATA_KEYS) if (typeof fields[key] === "string") metadata[key] = fields[key];
@@ -447,4 +453,124 @@ export async function deleteRun(workflowId: string, runId: string): Promise<bool
     DELETE_RUN_SCRIPT, [k.run(runId), k.runs(workflowId)], [runId]
   );
   return result === 1;
+}
+
+/* ------------------------------ Webhooks ------------------------------- */
+
+export const WEBHOOK_SECRET = /^[A-Za-z0-9_-]{43}$/;
+
+function secretHash(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
+export async function isWebhookEnabled(workflowId: string, principal: Principal): Promise<boolean> {
+  if (!(await getWorkflow(workflowId, principal))) throw new ApiError(404, "Workflow not found.");
+  return typeof (await getRedis().hget<string>(keys().workflow(workflowId), "webhookHash")) === "string";
+}
+
+/** Creates or replaces the secret. The old URL stops working immediately. */
+export async function rotateWebhookSecret(workflowId: string, principal: Principal): Promise<string> {
+  if (!(await getWorkflow(workflowId, principal))) throw new ApiError(404, "Workflow not found.");
+  const secret = randomBytes(32).toString("base64url");
+  await getRedis().hset(keys().workflow(workflowId), { webhookHash: secretHash(secret) });
+  return secret;
+}
+
+export async function disableWebhook(workflowId: string, principal: Principal): Promise<void> {
+  if (!(await getWorkflow(workflowId, principal))) throw new ApiError(404, "Workflow not found.");
+  await getRedis().hdel(keys().workflow(workflowId), "webhookHash");
+}
+
+/** Constant-time check of a webhook secret against the stored hash. */
+export async function verifyWebhookSecret(workflowId: string, secret: string): Promise<boolean> {
+  if (typeof workflowId !== "string" || !WORKFLOW_ID.test(workflowId)) return false;
+  if (typeof secret !== "string" || !WEBHOOK_SECRET.test(secret)) return false;
+  const names = ["webhookHash", "createdAt"] as const;
+  const fields = fieldsFrom(names, await getRedis().hmget(keys().workflow(workflowId), ...names));
+  if (!fields?.webhookHash || integer(fields.createdAt) === null || !/^[0-9a-f]{64}$/.test(fields.webhookHash)) return false;
+  return timingSafeEqual(Buffer.from(secretHash(secret), "hex"), Buffer.from(fields.webhookHash, "hex"));
+}
+
+/* ------------------------------ Schedules ------------------------------ */
+
+export type StoredSchedule = { schedule: WorkflowSchedule; nextRunAt: number | null };
+
+function readSchedule(text: unknown): WorkflowSchedule | null {
+  if (typeof text !== "string") return null;
+  try {
+    return parseSchedule(JSON.parse(text));
+  } catch {
+    // A damaged entry disables only this schedule.
+    return null;
+  }
+}
+
+export async function getSchedule(workflowId: string, principal: Principal): Promise<StoredSchedule | null> {
+  if (!(await getWorkflow(workflowId, principal))) throw new ApiError(404, "Workflow not found.");
+  const k = keys();
+  const schedule = readSchedule(await getRedis().hget<string>(k.workflow(workflowId), "schedule"));
+  if (!schedule) return null;
+  const score = await getRedis().zscore(k.schedules, workflowId);
+  return { schedule, nextRunAt: score === null || score === undefined ? null : Number(score) };
+}
+
+export async function setSchedule(workflowId: string, principal: Principal, value: unknown): Promise<StoredSchedule> {
+  const schedule = parseSchedule(value);
+  if (!(await getWorkflow(workflowId, principal))) throw new ApiError(404, "Workflow not found.");
+  const k = keys();
+  const next = nextRunAt(schedule, Date.now());
+  const pipeline = getRedis().pipeline();
+  pipeline.hset(k.workflow(workflowId), { schedule: JSON.stringify(schedule) });
+  pipeline.zadd(k.schedules, { score: next, member: workflowId });
+  await pipeline.exec();
+  return { schedule, nextRunAt: next };
+}
+
+export async function deleteSchedule(workflowId: string, principal: Principal): Promise<void> {
+  if (!(await getWorkflow(workflowId, principal))) throw new ApiError(404, "Workflow not found.");
+  const k = keys();
+  const pipeline = getRedis().pipeline();
+  pipeline.hdel(k.workflow(workflowId), "schedule");
+  pipeline.zrem(k.schedules, workflowId);
+  await pipeline.exec();
+}
+
+// Advance only if no other scheduler tick has moved this entry since it was read.
+export const CLAIM_SCHEDULE_SCRIPT = `
+local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if not score or tonumber(score) ~= tonumber(ARGV[2]) then return 0 end
+redis.call('ZADD', KEYS[1], tonumber(ARGV[3]), ARGV[1])
+return 1
+`;
+
+export type DueSchedule = { workflowId: string; schedule: WorkflowSchedule; dueAt: number; nextRunAt: number };
+
+/**
+ * Claims up to `limit` schedules due at `now` and advances each to its next
+ * time. Each due entry is claimed by exactly one caller, so overlapping
+ * scheduler ticks never start the same occurrence twice. Missed occurrences
+ * are not replayed: a schedule late by hours runs once, then resumes.
+ */
+export async function claimDueSchedules(now: number, limit: number): Promise<DueSchedule[]> {
+  const redis = getRedis();
+  const k = keys();
+  const raw = await redis.zrange<(string | number)[]>(k.schedules, "-inf", now, { byScore: true, withScores: true, offset: 0, count: limit });
+  const claimed: DueSchedule[] = [];
+  for (let index = 0; index + 1 < raw.length; index += 2) {
+    const workflowId = String(raw[index]);
+    const dueAt = Number(raw[index + 1]);
+    if (!WORKFLOW_ID.test(workflowId) || !Number.isFinite(dueAt)) continue;
+    const names = ["schedule", "createdAt"] as const;
+    const fields = fieldsFrom(names, await redis.hmget(k.workflow(workflowId), ...names));
+    const schedule = readSchedule(fields?.schedule);
+    if (!schedule || integer(fields?.createdAt) === null) {
+      // The workflow or its schedule is gone; drop the orphaned entry.
+      await redis.zrem(k.schedules, workflowId);
+      continue;
+    }
+    const next = nextRunAt(schedule, now);
+    const won = await redis.eval<(string | number)[], number>(CLAIM_SCHEDULE_SCRIPT, [k.schedules], [workflowId, dueAt, next]);
+    if (won === 1) claimed.push({ workflowId, schedule, dueAt, nextRunAt: next });
+  }
+  return claimed;
 }

@@ -107,7 +107,9 @@ export function RunProvider({ workflowId, children }: { workflowId: string; chil
   const [runsLoading, setRunsLoading] = useState(true);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [messages, setMessages] = useState<readonly NodeResultData[]>([]);
-  const [isLoading, setLoading] = useState(false);
+  // The run whose stored trace finished loading; the selection is loading until it matches.
+  const [loadedRunId, setLoadedRunId] = useState<string | null>(null);
+  const isLoading = selectedRunId !== null && loadedRunId !== selectedRunId;
   // Runs currently streaming into this tab; polling and snapshot loads skip their traces.
   const [streamingIds, setStreamingIds] = useState<ReadonlySet<string>>(() => new Set());
   const streaming = useRef(new Set<string>());
@@ -167,6 +169,8 @@ export function RunProvider({ workflowId, children }: { workflowId: string; chil
 
   // Initial list, then poll while any run is active elsewhere.
   useEffect(() => {
+    // refreshRuns sets state only after its fetch resolves, never synchronously.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refreshRuns();
   }, [refreshRuns]);
   const anyActive = runs.some((run) => run.metadata.status === "running" && !streamingIds.has(run.runId));
@@ -182,9 +186,10 @@ export function RunProvider({ workflowId, children }: { workflowId: string; chil
   useEffect(() => {
     if (!selectedRunId) return;
     const controller = new AbortController();
-    setLoading(true);
+    // loadRun sets state only after its fetch resolves, never synchronously.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadRun(selectedRunId, controller.signal).catch(() => undefined).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
+      if (!controller.signal.aborted) setLoadedRunId(selectedRunId);
     });
     return () => controller.abort();
   }, [selectedRunId, loadRun]);

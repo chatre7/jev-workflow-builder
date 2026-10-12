@@ -23,13 +23,15 @@ import {
   ClipboardCheck,
   Clock3,
   History,
+  RotateCcw,
   Route,
   Rows3,
   Table2,
   Trash2,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { RunRequestError, useApprovalExpired, useRun } from "./run-context";
+import { ScheduleSettings, WebhookSettings, useOrigin } from "./automation-panel";
 import { KnowledgeResultPreview } from "./nodes";
 import {
   formatCost,
@@ -57,6 +59,7 @@ import {
 } from "./shared";
 
 const MAX_RUNS = 25;
+const TRIGGER_LABELS: Record<string, string> = { test: "test run", api: "API", webhook: "webhook", schedule: "schedule" };
 
 type Tab = "runs" | "api";
 
@@ -156,11 +159,7 @@ function NodeTypeIcon({ type }: { type: WorkflowNodeType }) {
   }
 }
 
-function getApiUrl(workflowId: string): string {
-  const origin =
-    typeof window === "undefined"
-      ? "http://localhost:3000"
-      : window.location.origin;
+function getApiUrl(origin: string, workflowId: string): string {
   return `${origin}/api/workflows/${encodeURIComponent(workflowId)}/runs?wait=true`;
 }
 
@@ -363,13 +362,11 @@ function TraceNode({
   message,
   depth,
   onFocus,
-  workflowId,
   runId,
 }: {
   message: NodeResultData;
   depth: number;
   onFocus: () => void;
-  workflowId: string;
   runId: string;
 }) {
   const outputs = getRunOutput(message.outputs);
@@ -553,7 +550,42 @@ function TraceNode({
   );
 }
 
-function RunTrace({ workflowId }: { workflowId: string }) {
+/** Starts a new test run with the selected run's complete input and question. */
+function RerunButton({ input, question }: { input: string; question?: string }) {
+  const { startRun } = useRun();
+  const [isStarting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function rerun() {
+    setStarting(true);
+    setError(null);
+    try {
+      await startRun({ input, trigger: "test", ...(question ? { question } : {}) });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start run");
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  return (
+    <div className="mb-1.5 px-1">
+      <button
+        type="button"
+        onClick={() => void rerun()}
+        disabled={isStarting}
+        title="Run the current workflow again with this run's input"
+        className="inline-flex min-h-7 items-center gap-1 rounded-md px-2 text-[11px] text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 disabled:opacity-50"
+      >
+        {isStarting ? <Loader2 className="size-3 animate-spin" aria-hidden /> : <RotateCcw className="size-3" aria-hidden />}
+        {isStarting ? "Starting…" : "Re-run with this input"}
+      </button>
+      {error ? <p role="alert" className="mt-1 text-[11px] text-red-700">{error}</p> : null}
+    </div>
+  );
+}
+
+function RunTrace() {
   const { messages, isLoading, selectedRunId } = useRun();
   const reactFlow = useReactFlow<WorkflowNode>();
 
@@ -598,15 +630,16 @@ function RunTrace({ workflowId }: { workflowId: string }) {
   }
 
   const totals = sumUsage(messages);
+  const inputMessage = messages.find((message) => message.nodeType === "input" && message.status === "complete");
   return (
     <>
+      {inputMessage?.input ? <RerunButton input={inputMessage.input} question={inputMessage.question} /> : null}
       {totals.calls > 0 ? <UsageLine usage={totals} totals className="mb-1.5 px-1" /> : null}
       <ul className="flex flex-col gap-1.5">
       {messages.map((message) => (
         <TraceNode
           key={message.nodeId}
           message={message}
-          workflowId={workflowId}
           runId={selectedRunId}
           depth={depths.get(message.nodeId) ?? 0}
           onFocus={() =>
@@ -728,7 +761,7 @@ function RunList() {
                   ) : null}
                   <span className="mt-px block text-[10px] tabular-nums text-neutral-500">
                     {formatTime(Number(run.metadata.startedAt))} ·{" "}
-                    {run.metadata.trigger === "api" ? "API" : "test run"}
+                    {TRIGGER_LABELS[run.metadata.trigger] ?? "run"}
                     {run.metadata.status === "waiting"
                       ? selected && selectedExpired ? " · Approval expired" : " · Waiting for approval"
                       : run.metadata.completedAt
@@ -860,7 +893,9 @@ function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
   const csvConfig = JSON.stringify(csvNodes.map((node) => [node.id, node.data.delimiter, node.data.headers]));
   const uploadContext = JSON.stringify([workflow.workflowId, csvConfig, csvNode?.id]);
   const currentUploadContext = useRef(uploadContext);
-  currentUploadContext.current = uploadContext;
+  useLayoutEffect(() => {
+    currentUploadContext.current = uploadContext;
+  }, [uploadContext]);
 
   const sample = inputNode?.type === "input" ? inputNode.data.sample : "";
   const value = input ?? sample;
@@ -901,12 +936,15 @@ function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
 
   useEffect(() => () => cancelFileRead(), []);
 
+  const csvNodeId = csvNode?.id;
+  const csvDelimiter = csvNode?.data.delimiter;
+  const csvHeaders = csvNode?.data.headers;
   useEffect(() => {
-    if (!needsPreview || !csvNode) return;
+    if (!needsPreview || !csvNodeId) return;
     const controller = new AbortController();
-    const nodeId = csvNode.id;
-    const delimiter = csvNode.data.delimiter;
-    const headers = csvNode.data.headers;
+    const nodeId = csvNodeId;
+    const delimiter = csvDelimiter;
+    const headers = csvHeaders;
     const timer = window.setTimeout(async () => {
       try {
         const response = await fetch(
@@ -937,7 +975,7 @@ function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [needsPreview, previewKey, csvNode?.id, csvNode?.data.delimiter, csvNode?.data.headers, value, workflow.workflowId]);
+  }, [needsPreview, previewKey, csvNodeId, csvDelimiter, csvHeaders, value, workflow.workflowId]);
 
   function chooseFile(file: File | undefined) {
     if (!file) return;
@@ -1148,7 +1186,7 @@ function RunsTab({ workflow }: { workflow: WorkflowSummary }) {
           <RunList />
         </Section>
         <Section title="Execution trace">
-          <RunTrace workflowId={workflow.workflowId} />
+          <RunTrace />
         </Section>
       </div>
     </div>
@@ -1226,13 +1264,9 @@ function getSnippet(language: SnippetLanguage, url: string): string {
 function ApiTab({ workflow }: { workflow: WorkflowSummary }) {
   const [language, setLanguage] = useState<SnippetLanguage>("curl");
   const [copied, setCopied] = useState(false);
-  const [url, setUrl] = useState(() =>
-    getApiUrl(workflow.workflowId)
-  );
-
-  useEffect(() => {
-    setUrl(getApiUrl(workflow.workflowId));
-  }, [workflow.workflowId]);
+  const url = getApiUrl(useOrigin(), workflow.workflowId);
+  const inputNode = useNodesData<WorkflowNode>(INPUT_NODE_ID);
+  const sampleInput = inputNode?.type === "input" ? inputNode.data.sample : "";
 
   const snippet = getSnippet(language, url);
 
@@ -1341,6 +1375,8 @@ function ApiTab({ workflow }: { workflow: WorkflowSummary }) {
           </ul>
         </div>
       </details>
+      <WebhookSettings key={`webhook-${workflow.workflowId}`} workflowId={workflow.workflowId} />
+      <ScheduleSettings key={workflow.workflowId} workflowId={workflow.workflowId} sampleInput={sampleInput} />
     </div>
   );
 }

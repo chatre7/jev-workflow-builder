@@ -44,7 +44,7 @@ async function harness({ streamText, readGraph, clientOverrides = {}, approvals,
       "@upstash/redis": { Redis },
       "csv-parse/sync": csvParse,
       "./auth": { getPrincipal: async () => null },
-      "./store": { getWorkspaceId: () => "private", getRunStore: () => client, readWorkflowGraph: (...args) => readGraph ? readGraph(...args) : Promise.resolve(graph) },
+      "./store": { getWorkspaceId: () => "private", workflowIdFromRoomId: (roomId) => roomId.split(":").pop(), getRunStore: () => client, readWorkflowGraph: (...args) => readGraph ? readGraph(...args) : Promise.resolve(graph) },
       ...(approvals ? { "./approvals": approvals } : {}),
       ai: {
         streamText: streamText ?? (() => ({ textStream: (async function* () { yield "A helpful reply."; })() })),

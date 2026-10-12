@@ -44,6 +44,16 @@ export function createFakeRedis() {
       const source = hashes.get(key);
       return fields.map((field) => source?.get(field) ?? null);
     },
+    async hdel(key, ...fields) {
+      const target = hashes.get(key);
+      let count = 0;
+      for (const field of fields) if (target?.delete(field)) count++;
+      return count;
+    },
+    async zscore(key, member) {
+      const score = zsets.get(key)?.get(member);
+      return score === undefined ? null : String(score);
+    },
     async hgetall(key) {
       const source = hashes.get(key);
       return source ? [...source.entries()].flat() : [];
@@ -70,6 +80,14 @@ export function createFakeRedis() {
       return count;
     },
     async zrange(key, start, stop, options = {}) {
+      if (options.byScore) {
+        const min = start === "-inf" ? -Infinity : Number(start);
+        const max = stop === "+inf" ? Infinity : Number(stop);
+        const source = zsets.get(key) ?? new Map();
+        const matched = sorted(key).filter((member) => source.get(member) >= min && source.get(member) <= max)
+          .slice(options.offset ?? 0, (options.offset ?? 0) + (options.count ?? Infinity));
+        return options.withScores ? matched.flatMap((member) => [member, String(source.get(member))]) : matched;
+      }
       let members = sorted(key);
       if (options.rev) members = members.reverse();
       const end = stop < 0 ? members.length + stop + 1 : stop + 1;
@@ -106,6 +124,15 @@ export function createFakeRedis() {
         if (hashes.get(runKey)?.get("status") === "running") return 0;
         await commands.del(runKey);
         await commands.zrem(runsKey, args[0]);
+        return 1;
+      }
+      if (script.includes("ZSCORE") && script.includes("ARGV[3]")) {
+        // CLAIM_SCHEDULE_SCRIPT
+        const [schedulesKey] = keys;
+        const [member, expected, next] = args;
+        const score = zsets.get(schedulesKey)?.get(member);
+        if (score === undefined || score !== Number(expected)) return 0;
+        zset(schedulesKey).set(member, Number(next));
         return 1;
       }
       throw new Error("Unsupported script in fake Redis.");

@@ -392,7 +392,7 @@ function NodeFrame({
 /*                                 Input node                                 */
 /* -------------------------------------------------------------------------- */
 
-const InputNodeView = memo(({ id, data, selected }: NodeProps<InputNode>) => {
+const InputNodeView = memo(function InputNodeView({ id, data, selected }: NodeProps<InputNode>) {
   const { updateNodeData } = useReactFlow<WorkflowNode>();
   const { results } = useRun();
   const result = results.get(id);
@@ -648,7 +648,7 @@ function QuestionEditor({
   );
 }
 
-const JevNodeView=memo(({ id,data,selected }: NodeProps<JevNode>) => {
+const JevNodeView = memo(function JevNodeView({ id, data, selected }: NodeProps<JevNode>) {
   const { updateNodeData }=useReactFlow<WorkflowNode>();
   const { results }=useRun();
   const result=results.get(id);
@@ -798,7 +798,11 @@ function LlmFieldEditor({
   const [error, setError] = useState<string | null>(null);
   const errorId = useId();
 
-  useEffect(() => setDraft(field.name), [field.name]);
+  const [syncedName, setSyncedName] = useState(field.name);
+  if (syncedName !== field.name) {
+    setSyncedName(field.name);
+    setDraft(field.name);
+  }
 
   function commit(value: string) {
     const name = value.trim();
@@ -895,7 +899,7 @@ function LlmFieldEditor({
   );
 }
 
-const LlmNodeView = memo(({ id, data, selected }: NodeProps<LlmNode>) => {
+const LlmNodeView = memo(function LlmNodeView({ id, data, selected }: NodeProps<LlmNode>) {
   const { updateNodeData } = useReactFlow<WorkflowNode>();
   const { results } = useRun();
   const result = results.get(id);
@@ -1095,7 +1099,7 @@ function DataSourceHelp({ nodeId }: { nodeId: string }) {
 }
 
 const ConditionNodeView = memo(
-  ({ id, data, selected }: NodeProps<ConditionNode>) => {
+  function ConditionNodeView({ id, data, selected }: NodeProps<ConditionNode>) {
     const { updateNodeData } = useReactFlow<WorkflowNode>();
     const { results } = useRun();
     const result = results.get(id);
@@ -1199,7 +1203,11 @@ function TransformFieldEditor({
   const [error, setError] = useState<string | null>(null);
   const errorId = useId();
 
-  useEffect(() => setDraft(field.name), [field.name]);
+  const [syncedName, setSyncedName] = useState(field.name);
+  if (syncedName !== field.name) {
+    setSyncedName(field.name);
+    setDraft(field.name);
+  }
 
   function commit(value: string) {
     const name = value.trim();
@@ -1278,7 +1286,7 @@ function TransformFieldEditor({
 }
 
 const TransformNodeView = memo(
-  ({ id, data, selected }: NodeProps<TransformNode>) => {
+  function TransformNodeView({ id, data, selected }: NodeProps<TransformNode>) {
     const { updateNodeData } = useReactFlow<WorkflowNode>();
     const { results } = useRun();
     const result = results.get(id);
@@ -1372,7 +1380,7 @@ const TransformNodeView = memo(
   }
 );
 
-const CsvNodeView = memo(({ id, data, selected }: NodeProps<CsvNode>) => {
+const CsvNodeView = memo(function CsvNodeView({ id, data, selected }: NodeProps<CsvNode>) {
   const { updateNodeData } = useReactFlow<WorkflowNode>();
   const { results } = useRun();
   const result = results.get(id);
@@ -1489,7 +1497,11 @@ function TableAggregateEditor({
   const [error, setError] = useState<string | null>(null);
   const errorId = useId();
 
-  useEffect(() => setDraft(aggregate.name), [aggregate.name]);
+  const [syncedName, setSyncedName] = useState(aggregate.name);
+  if (syncedName !== aggregate.name) {
+    setSyncedName(aggregate.name);
+    setDraft(aggregate.name);
+  }
 
   function commit(name: string) {
     let message: string | null = null;
@@ -1581,7 +1593,7 @@ function TableAggregateEditor({
   );
 }
 
-const TableNodeView = memo(({ id, data, selected }: NodeProps<TableNode>) => {
+const TableNodeView = memo(function TableNodeView({ id, data, selected }: NodeProps<TableNode>) {
   const { updateNodeData } = useReactFlow<WorkflowNode>();
   const { results } = useRun();
   const result = results.get(id);
@@ -1824,7 +1836,7 @@ const TableNodeView = memo(({ id, data, selected }: NodeProps<TableNode>) => {
 /*                              Connected nodes                               */
 /* -------------------------------------------------------------------------- */
 
-const HttpNodeView = memo(({ id, data, selected }: NodeProps<HttpNode>) => {
+const HttpNodeView = memo(function HttpNodeView({ id, data, selected }: NodeProps<HttpNode>) {
   const { updateNodeData } = useReactFlow<WorkflowNode>();
   const { results } = useRun();
   const result = results.get(id);
@@ -1896,7 +1908,7 @@ const HttpNodeView = memo(({ id, data, selected }: NodeProps<HttpNode>) => {
   );
 });
 
-const ApprovalNodeView = memo(({ id, data, selected }: NodeProps<ApprovalNode>) => {
+const ApprovalNodeView = memo(function ApprovalNodeView({ id, data, selected }: NodeProps<ApprovalNode>) {
   const { updateNodeData } = useReactFlow<WorkflowNode>();
   const { results } = useRun();
   const result = results.get(id);
@@ -2000,7 +2012,7 @@ export function KnowledgeResultPreview({ output, compact = false }: { output: st
   );
 }
 
-const KnowledgeNodeView = memo(({ id, data, selected }: NodeProps<KnowledgeNode>) => {
+const KnowledgeNodeView = memo(function KnowledgeNodeView({ id, data, selected }: NodeProps<KnowledgeNode>) {
   const { updateNodeData } = useReactFlow<WorkflowNode>();
   const { results } = useRun();
   const result = results.get(id);
@@ -2073,7 +2085,11 @@ function OutputPropertyEditor({
   const [error, setError] = useState<string | null>(null);
   const errorId = useId();
 
-  useEffect(() => setDraft(property.name), [property.name]);
+  const [syncedName, setSyncedName] = useState(property.name);
+  if (syncedName !== property.name) {
+    setSyncedName(property.name);
+    setDraft(property.name);
+  }
 
   function commit(value: string) {
     const name = value.trim();
@@ -2147,7 +2163,7 @@ function OutputPropertyEditor({
   );
 }
 
-const OutputNodeView = memo(({ id, data, selected }: NodeProps<OutputNode>) => {
+const OutputNodeView = memo(function OutputNodeView({ id, data, selected }: NodeProps<OutputNode>) {
   const { updateNodeData, setEdges } = useReactFlow<
     WorkflowNode,
     WorkflowEdge

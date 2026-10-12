@@ -11,6 +11,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -88,7 +89,9 @@ export function GraphProvider({
   // The last stored text we know of; nothing is saved when it is unchanged.
   const savedText = useRef(JSON.stringify(toStoredGraph(initialGraph)));
   const latest = useRef<Snapshot>({ nodes, edges });
-  latest.current = { nodes, edges };
+  useLayoutEffect(() => {
+    latest.current = { nodes, edges };
+  }, [nodes, edges]);
 
   const record = useCallback(() => {
     const snapshot = latest.current;

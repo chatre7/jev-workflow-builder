@@ -20,7 +20,8 @@ export function getRunOutput(
 }
 
 export type RunStatus = "running" | "waiting" | "complete" | "error";
-export type RunTrigger = "test" | "api";
+export const RUN_TRIGGERS = ["test", "api", "webhook", "schedule"] as const;
+export type RunTrigger = (typeof RUN_TRIGGERS)[number];
 export type NodeStatus = "running" | "waiting" | "complete" | "error" | "skipped";
 
 export type ChoiceAnswer = {

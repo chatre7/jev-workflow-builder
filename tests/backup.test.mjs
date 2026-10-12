@@ -157,3 +157,12 @@ test("backup routes require the owner browser session and import checks origin a
   assert.equal(workflows[0].name, "Support ticket triage");
   assert.equal(h.rooms.size, 2);
 });
+
+test("bundled example packs parse and validate as importable backups", async () => {
+  const h = await harness();
+  const { readFile } = await import("node:fs/promises");
+  for (const file of ["examples/sample-workflows.json", "examples/sample-notify-workflow.json"]) {
+    const parsed = h.backup.parseBackup(JSON.parse(await readFile(new URL(`../${file}`, import.meta.url), "utf8")));
+    assert(parsed.length >= 1, file);
+  }
+});
