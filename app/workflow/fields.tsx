@@ -2,7 +2,6 @@
 
 import {
   useCallback,
-  useEffect,
   useRef,
   useState,
   type ComponentProps,
@@ -15,10 +14,12 @@ import {
  */
 function useDraft(value: string, onCommit: (value: string) => void) {
   const [draft, setDraft] = useState(value);
-
-  useEffect(() => {
+  // Adopt an external change (undo, another tab) during render, not in an effect.
+  const [synced, setSynced] = useState(value);
+  if (synced !== value) {
+    setSynced(value);
     setDraft(value);
-  }, [value]);
+  }
 
   // Blur runs before React re-renders, so it would still see the edited draft.
   const cancelled = useRef(false);

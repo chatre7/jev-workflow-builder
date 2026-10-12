@@ -65,7 +65,8 @@ import {
 } from "./execution-policy";
 import { validateWorkflowGraph, type ValidatedWorkflowGraph } from "./execution-validation";
 import { evaluateCondition, transformData, type DataNodeContext } from "./data-nodes";
-import { getRunStore, readWorkflowGraph, type RunStore } from "./store";
+import { getRunStore, readWorkflowGraph, workflowIdFromRoomId, type RunStore } from "./store";
+import { notifyApprovalWaiting } from "./notify";
 import { runLlm } from "./llm";
 import { parseStructuredOutput } from "./structured";
 import { askJev, toTypeSafeQuestions, type JevState } from "./typesafe";
@@ -650,6 +651,15 @@ async function runWorkflow(runId: string, options: RunWorkflowOptions, claim?: C
         await abortable(store!.updateRun({ roomId, runId, metadata: finalMetadata }, { signal: cleanupSignal }), cleanupSignal);
       }, FEED_FINALIZE_TIMEOUT_MS);
     } catch { /* Never expose transport errors or let cleanup hold the run open. */ }
+  }
+  if (waiting && !error) {
+    // Only approvals that started waiting in this phase; earlier ones were announced already.
+    const announced = new Set(saved?.pending.map((item) => item.nodeId) ?? []);
+    const approvals = [...pending.values()].filter((item) => !announced.has(item.nodeId)).flatMap((item) => {
+      const message = messages.get(item.nodeId);
+      return message?.approval ? [{ label: message.label, prompt: message.approval.prompt, expiresAt: item.expiresAt }] : [];
+    });
+    if (approvals.length > 0) await notifyApprovalWaiting({ workflowId: workflowIdFromRoomId(roomId), runId, approvals });
   }
   const outputMessage = [...messages.values()].find((message) => message.nodeType === "output" && message.status === "complete");
   return {

@@ -61,19 +61,13 @@ export async function authenticateOwnerRequest(request: Request, purpose: string
   return principal;
 }
 
-/** Enforce a byte budget while reading, not after request.json() has allocated. */
-export async function readJsonObject(
-  request: Request,
-  maxBytes = 96 * 1024
-): Promise<Record<string, unknown>> {
-  if (request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
-    throw new ApiError(415, "Content-Type must be application/json.");
-  }
+/** Reads a UTF-8 body within a byte budget and a five-second deadline, before any parsing allocates. */
+export async function readBodyText(request: Request, maxBytes: number): Promise<string> {
   const length = request.headers.get("content-length");
   if (length !== null && (!/^\d+$/.test(length) || Number(length) > maxBytes)) {
     throw new ApiError(413, "Request body is too large.");
   }
-  if (!request.body) throw new ApiError(400, "A JSON object is required.");
+  if (!request.body) return "";
 
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -98,17 +92,36 @@ export async function readJsonObject(
       buffer.set(chunk, offset);
       offset += chunk.byteLength;
     }
-    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer));
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new ApiError(400, "A JSON object is required.");
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    } catch {
+      throw new ApiError(400, "Request body must be UTF-8 text.");
     }
-    return parsed as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof ApiError) throw error;
-    throw new ApiError(400, "A valid JSON object is required.");
   } finally {
     clearTimeout(timer);
     if (!complete) void reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
+}
+
+/** Enforce a byte budget while reading, not after request.json() has allocated. */
+export async function readJsonObject(
+  request: Request,
+  maxBytes = 96 * 1024
+): Promise<Record<string, unknown>> {
+  if (request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+    throw new ApiError(415, "Content-Type must be application/json.");
+  }
+  if (!request.body) throw new ApiError(400, "A JSON object is required.");
+  const text = await readBodyText(request, maxBytes);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new ApiError(400, "A valid JSON object is required.");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ApiError(400, "A JSON object is required.");
+  }
+  return parsed as Record<string, unknown>;
 }

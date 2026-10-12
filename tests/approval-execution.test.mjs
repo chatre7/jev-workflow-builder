@@ -30,7 +30,7 @@ function approvalStore() {
 
 async function harness({ store = approvalStore(), graph, http, llm, knowledge } = {}) {
   const events = [];
-  const calls = { graph: 0, http: [], llm: [], knowledge: [] };
+  const calls = { graph: 0, http: [], llm: [], knowledge: [], notices: [] };
   let serial = 0;
   const client = {
     createRun: async (args) => events.push({ kind: "createFeed", ...structuredClone(args) }),
@@ -40,7 +40,12 @@ async function harness({ store = approvalStore(), graph, http, llm, knowledge } 
   const load = createModuleLoader({ stubs: {
     nanoid: { nanoid: () => `id${++serial}` },
     "csv-parse/sync": csvParse,
-    "./store": { getRunStore: () => client, readWorkflowGraph: async () => { calls.graph++; return graph; } },
+    "./store": {
+      getRunStore: () => client,
+      readWorkflowGraph: async () => { calls.graph++; return graph; },
+      workflowIdFromRoomId: (roomId) => roomId.split(":").pop(),
+    },
+    "./notify": { notifyApprovalWaiting: async (notice) => { calls.notices.push(structuredClone(notice)); } },
     "./approvals": store,
     "./http": { runHttpRequest: async (options) => { calls.http.push(options); return http ? http(options) : { text: "upstream-result", status: 200 }; } },
     "./knowledge": { searchKnowledge: async (options) => { calls.knowledge.push(options); return knowledge ? knowledge(options) : '{"matches":[]}'; } },
@@ -142,6 +147,30 @@ test("parallel approvals block OR joins and output until every potential parent 
   assert.equal(h.calls.llm.length, 1);
   assert.deepEqual(Array.from(both.output.customer), ["Reply to original-input\n\noriginal-input"]);
   assert.deepEqual(Array.from(both.output.team), ["original-input"]);
+});
+
+test("approval notices announce each waiting approval once, with its rendered prompt", async () => {
+  const h = await harness();
+  const s = h.shared;
+  h.setGraph({
+    nodes: [node(s, "input", "input"), node(s, "approval", "left"), node(s, "approval", "right"), node(s, "output", "output")],
+    edges: [edge(s, "input", "left"), edge(s, "input", "right"),
+      edge(s, "left", "output", "approved"), edge(s, "right", "output", "approved")],
+  });
+  const waiting = await h.executor.startWorkflowRun({ roomId: "jev:workflows:private:wf-notify-1", input: "refund A-1", trigger: "webhook" }).trace$;
+  assert.equal(waiting.status, "waiting");
+  assert.equal(h.calls.notices.length, 1);
+  const [notice] = h.calls.notices;
+  assert.equal(notice.workflowId, "wf-notify-1");
+  assert.equal(notice.runId, waiting.runId);
+  assert.deepEqual(notice.approvals.map((item) => item.prompt).sort(), ["Approve refund A-1?", "Approve refund A-1?"]);
+  // Resuming one approval leaves the other waiting; it was already announced.
+  const one = await h.executor.resumeWorkflowRun(await h.store.claim(waiting.runId, "left")).trace$;
+  assert.equal(one.status, "waiting");
+  assert.equal(h.calls.notices.length, 1);
+  const done = await h.executor.resumeWorkflowRun(await h.store.claim(waiting.runId, "right")).trace$;
+  assert.equal(done.status, "complete");
+  assert.equal(h.calls.notices.length, 1);
 });
 
 test("sequential approval phases preserve inherited results, execution counts and cumulative budgets", async () => {

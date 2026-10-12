@@ -3,10 +3,11 @@
 import { Check, ChevronRight, CloudOff, Download, Loader2, Plus, Workflow } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { HelpButton } from "../../components/help-button";
 import { createWorkflowAction, renameWorkflowAction } from "./actions";
 import { useGraph } from "./graph-context";
+import { HealthIndicator } from "./health-indicator";
 import type { WorkflowSummary } from "./server/store";
 
 export function WorkflowHeader({
@@ -21,9 +22,11 @@ export function WorkflowHeader({
   // Escape blurs before React re-renders, so blur would otherwise save the edit.
   const cancelled = useRef(false);
 
-  useEffect(() => {
+  const [syncedName, setSyncedName] = useState(workflow.name);
+  if (syncedName !== workflow.name) {
+    setSyncedName(workflow.name);
     setName(workflow.name);
-  }, [workflow.name]);
+  }
 
   function commitName() {
     if (cancelled.current) {
@@ -94,6 +97,7 @@ export function WorkflowHeader({
       </div>
 
       <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
+        <HealthIndicator />
         <span
           role="status"
           title={
